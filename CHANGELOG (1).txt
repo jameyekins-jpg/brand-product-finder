@@ -1,5 +1,0 @@
-
-Brand/Product Page Finder — v1.4
-- Memory-safe scanning (no HTML caching; streaming executor.map).
-- Better error surfacing with st.exception so you see the traceback in the app instead of a blank 'Oh no' page.
-- Keeps brand-only search and the alias tip directly under the paste box.
