@@ -1,5 +1,6 @@
-Brand/Product Page Finder — v1.8
-- NEW: 'Exclude common paths (/tag/, /category/, /page/, /feed/)' checkbox (pre-checked).
-- Merges any additional custom exclusions you type.
-- Minor robustness fix for 'Require brand & product' in product-only searches.
-- Keeps strict brand proximity + ignore lists from v1.7.
+Brand/Product Page Finder — v1.9
+- Results persist in session for 10 minutes by default (configurable). Cached results include a direct CSV (with URLs).
+- Download button label clarified: 'full results (with URLs)' vs 'summary (no URLs)'.
+- Stronger product-name cleanup: trims trailing lower-case/stopwords ('actually', 'has', 'lowest entrance', etc.).
+- Canonicalization: if a detected phrase contains a known product name/alias for the brand, it snaps to the canonical name.
+- One row per (brand, product, URL) guaranteed (de-duplication).
