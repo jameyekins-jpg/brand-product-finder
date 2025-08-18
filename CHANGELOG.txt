@@ -1,0 +1,5 @@
+
+Brand/Product Page Finder — v1.3
+- Keeps brand-only search.
+- Moves the 'Tip: Add common aliases...' directly under the paste box for visibility.
+- Minor copy tweaks for clarity.
