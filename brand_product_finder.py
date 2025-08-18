@@ -22,7 +22,7 @@ st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 # Helpers
 # ----------------------------
 
-USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/1.6; +https://example.com)"
+USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/1.8; +https://example.com)"
 DEFAULT_TIMEOUT = 15
 
 def fetch(url: str) -> t.Optional[str]:
@@ -128,44 +128,9 @@ def compile_brand_pattern(brand: str, case_sensitive: bool) -> re.Pattern:
     flags = 0 if case_sensitive else re.I
     return re.compile(r"\b" + flexible_token_regex(brand) + r"\b", flags=flags)
 
-def parse_csv_products(file_bytes: bytes) -> t.List[Product]:
-    decoded = file_bytes.decode("utf-8", errors="ignore")
-    reader = csv.DictReader(io.StringIO(decoded))
-    prods: t.List[Product] = []
-    for row in reader:
-        brand = (row.get("brand") or row.get("Brand") or "").strip() or "Unknown"
-        name = (row.get("product") or row.get("Product") or row.get("name") or "").strip()
-        aliases_raw = (row.get("aliases") or row.get("Aliases") or "").strip()
-        aliases = [a.strip() for a in aliases_raw.split("|") if a.strip()] if aliases_raw else []
-        if name:
-            prods.append(Product(brand=brand, name=name, aliases=aliases, brand_only=False))
-        else:
-            prods.append(Product(brand=brand, name="", aliases=[], brand_only=True))
-    return prods
-
-def parse_pasted_products(pasted: str) -> t.List[Product]:
-    # Accepts: Brand,Product,Alias1|Alias2  | Brand,Product  | Brand,  | Product
-    prods: t.List[Product] = []
-    for raw in pasted.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) >= 2:
-            brand, name = parts[0] or "Unknown", parts[1]
-            if name:
-                aliases = [a.strip() for a in parts[2].split("|")] if len(parts) >=3 and parts[2] else []
-                prods.append(Product(brand=brand, name=name, aliases=aliases, brand_only=False))
-            else:
-                prods.append(Product(brand=brand, name="", aliases=[], brand_only=True))
-        else:
-            prods.append(Product(brand="Unknown", name=line, aliases=[], brand_only=False))
-    return prods
-
-# --- Product autodetection ---
+# --- Product autodetection bits from v1.7 ---
 
 def jsonld_products(html: str) -> t.List[tuple[str,str]]:
-    """Return list of (brand, product_name) from JSON-LD Product nodes if present."""
     out = []
     try:
         soup = BeautifulSoup(html, "html.parser")
@@ -193,34 +158,45 @@ def jsonld_products(html: str) -> t.List[tuple[str,str]]:
         pass
     return out
 
-GENERIC_ENDINGS = re.compile(r"(?:\s+(?:review|guide|how to|best|top|vs\.?|comparison|overview|202\d|20\d{2}))+$", re.I)
+GENERIC_BAD_TOKENS = {"guide","beginners","beginner","best","top","vs","comparison","compare","review","reviews","peace","2020","2021","2022","2023","2024","2025"}
 
-def clean_product_phrase(brand: str, phrase: str) -> str:
-    s = phrase.strip(" -–—:|.,)™® ")
-    s = re.sub(GENERIC_ENDINGS, "", s).strip(" -–—:|.,)™® ")
-    # remove leading brand
-    if s.lower().startswith(brand.lower() + " "):
-        s = s[len(brand)+1:].strip()
-    return s
+def clean_phrase(s: str) -> str:
+    return s.strip(" -–—:|.,)™®(")
 
-def detect_products_from_text(text: str, brand: str, max_per_page: int = 3) -> t.List[str]:
-    """Heuristics to pull product names that co-occur with the brand in raw text."""
+def valid_product_name(name: str, ignore_words: set[str], other_brands: set[str]) -> bool:
+    w = [t for t in re.split(r"\s+", name.strip()) if t]
+    if len(w) < 2 or len(w) > 8:
+        return False
+    low = name.lower()
+    if sum(ch.isdigit() for ch in name) > max(3, len(name)//3 + 1):
+        return False
+    for bad in GENERIC_BAD_TOKENS.union(ignore_words):
+        if bad and bad.lower() in low:
+            return False
+    for ob in other_brands:
+        if ob and ob.lower() in low:
+            return False
+    return True
+
+def detect_products_from_text(text: str, brand: str, max_per_page: int, ignore_words: set[str], other_brands: set[str]) -> t.List[str]:
     out = []
-    # Pattern 1: "Brand Product Name ..."
-    p1 = re.compile(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z0-9][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,7}})", re.I)
-    # Pattern 2: "Product Name by Brand"
-    p2 = re.compile(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,7}})\s+(?:by|from)\s+{re.escape(brand)}\b", re.I)
+    sentences = re.split(r"(?<=[\.\!\?])\s+", text)
+    brand_re = re.compile(rf"\b{re.escape(brand)}\b", re.I)
 
-    for m in p1.finditer(text):
-        phrase = clean_product_phrase(brand, m.group(1))
-        if len(phrase.split()) >= 2:
-            out.append(phrase)
-    for m in p2.finditer(text):
-        phrase = clean_product_phrase(brand, m.group(1))
-        if len(phrase.split()) >= 2:
-            out.append(phrase)
+    for s in sentences:
+        if not brand_re.search(s):
+            continue
+        for m in re.finditer(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z0-9][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,6}})", s, flags=re.I):
+            phrase = clean_phrase(m.group(1))
+            if valid_product_name(phrase, ignore_words, other_brands):
+                out.append(phrase)
+        for m in re.finditer(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,6}})\s+(?:by|from)\s+{re.escape(brand)}\b", s, flags=re.I):
+            phrase = clean_phrase(m.group(1))
+            if valid_product_name(phrase, ignore_words, other_brands):
+                out.append(phrase)
+        if len(out) >= max_per_page:
+            break
 
-    # De-dup while keeping order
     seen = set()
     res = []
     for p in out:
@@ -253,32 +229,22 @@ def title_guess(html: str) -> str:
 # ----------------------------
 
 st.title("🔎 Brand & Product Page Finder")
-st.write("Find where your brands and products are mentioned across your site(s). Use **brand-only** lines to list every page that mentions a brand.")
 
 with st.expander("How it works & Input Examples", expanded=False):
     st.markdown("""
-**Option 1 — Upload CSV** (columns must be exactly):
-```
-brand,product,aliases
-```
-- **brand** → Company name (e.g., Whisker, PetSafe, Tractive)
-- **product** → Product name (e.g., Litter-Robot 4). Leave blank to search by **brand-only**.
-- **aliases** *(optional)* → Alternate names, separated by `|` (e.g., `Litter Robot 4|LR4`)
-
-**Option 2 — Paste lines (one per line)**
-Accepted:
+**Paste or upload products**. One line per item:
 ```
 Brand,Product,Alias1|Alias2
 Brand,Product
-Brand,          # Brand-only (find any page with this brand)
-Product         # Product-only (brand auto-detected if possible)
+Brand,          # brand-only
+Product         # product-only
 ```
 Examples:
 ```
 Whisker,Litter-Robot 4,Litter Robot 4|LR4
-PetSafe,                         # brand-only search for PetSafe
+PetSafe,
 Tractive,Tractive GPS Cat Tracker,Tractive Cat Collar|Tractive Tracker
-Litter-Robot 4                   # product-only
+Litter-Robot 4
 ```
 """)
 
@@ -288,7 +254,7 @@ with colA:
 with colB:
     crawl_limit = st.number_input("Max pages per site (if no sitemap)", min_value=50, max_value=10000, value=800, step=50)
 
-uploaded = st.file_uploader("Upload CSV of products (brand,product,aliases)", type=["csv"], accept_multiple_files=False)
+uploaded = st.file_uploader("Upload CSV of products (columns: brand,product,aliases)", type=["csv"], accept_multiple_files=False)
 
 pasted_ph = (
 "Whisker,Litter-Robot 4,Litter Robot 4|LR4\n"
@@ -296,7 +262,7 @@ pasted_ph = (
 "Tractive,Tractive GPS Cat Tracker,Tractive Cat Collar|Tractive Tracker\n"
 "Litter-Robot 4                   # Product-only"
 )
-pasted = st.text_area("Or paste products (one per line: Brand,Product,alias1|alias2)", height=180, placeholder=pasted_ph)
+pasted = st.text_area("Or paste products (one per line)", height=180, placeholder=pasted_ph)
 st.markdown("**Tip:** Add common aliases (e.g., `Litter-Robot 4|Litter Robot 4|LR4`) to improve matching.")
 
 col1, col2, col3 = st.columns([1,1,1])
@@ -307,16 +273,86 @@ with col2:
 with col3:
     stop_after = st.number_input("Stop after N pages per product (0 = no limit)", min_value=0, max_value=1000, value=0)
 
+# NEW: common excludes checkbox (pre-checked) + custom text input that merges
+common_excludes_checked = st.checkbox("Exclude common paths (/tag/, /category/, /page/, /feed/)", value=True)
+custom_excludes = st.text_input("Additional URL patterns to exclude (comma-separated)", value="")
+
 col4, col5 = st.columns([2,1])
 with col4:
-    exclude_patterns = st.text_input("Exclude URL patterns (comma-separated)", placeholder="/tag/, /category/, /page/, /feed/")
-with col5:
     require_brand_match = st.checkbox("Require brand & product on page", value=False)
+with col5:
+    search_case_sensitive = st.checkbox("Case sensitive search", value=False)
 
-search_case_sensitive = st.checkbox("Case sensitive search", value=False)
+strict_mode = st.checkbox("Strict brand proximity (reduce wrong products)", value=True)
+ignore_words_text = st.text_input("Ignore product names containing these words (comma-separated)",
+                                  value="guide,beginners,review,best,top,vs,comparison,peace")
+other_brands_text = st.text_input("Other brands/words to ignore (comma-separated)", value="")
 auto_detect = st.checkbox("Auto-detect product names from JSON-LD/title/text when possible", value=True)
 max_names = st.slider("Max detected product names per page", 1, 5, 3)
 run = st.button("Run Scan")
+
+# ----------------------------
+# Parsing helpers
+# ----------------------------
+
+@dataclass
+class Product:
+    brand: str
+    name: str
+    aliases: t.List[str] = field(default_factory=list)
+    brand_only: bool = False
+
+def parse_csv_products(file_bytes: bytes) -> t.List[Product]:
+    decoded = file_bytes.decode("utf-8", errors="ignore")
+    reader = csv.DictReader(io.StringIO(decoded))
+    prods: t.List[Product] = []
+    for row in reader:
+        brand = (row.get("brand") or row.get("Brand") or "").strip() or "Unknown"
+        name = (row.get("product") or row.get("Product") or row.get("name") or "").strip()
+        aliases_raw = (row.get("aliases") or row.get("Aliases") or "").strip()
+        aliases = [a.strip() for a in aliases_raw.split("|") if a.strip()] if aliases_raw else []
+        if name:
+            prods.append(Product(brand=brand, name=name, aliases=aliases, brand_only=False))
+        else:
+            prods.append(Product(brand=brand, name="", aliases=[], brand_only=True))
+    return prods
+
+def parse_pasted_products(pasted: str) -> t.List[Product]:
+    prods: t.List[Product] = []
+    for raw in pasted.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 2:
+            brand, name = parts[0] or "Unknown", parts[1]
+            if name:
+                aliases = [a.strip() for a in parts[2].split("|")] if len(parts) >=3 and parts[2] else []
+                prods.append(Product(brand=brand, name=name, aliases=aliases, brand_only=False))
+            else:
+                prods.append(Product(brand=brand, name="", aliases=[], brand_only=True))
+        else:
+            prods.append(Product(brand="Unknown", name=line, aliases=[], brand_only=False))
+    return prods
+
+def compile_brand_pattern(brand: str, case_sensitive: bool) -> re.Pattern:
+    flags = 0 if case_sensitive else re.I
+    return re.compile(r"\b" + flexible_token_regex(brand) + r"\b", flags=flags)
+
+@dataclass
+class _ProductPattern:
+    brand: str
+    name: str
+    brand_only: bool
+    pats: t.List[re.Pattern]
+
+def product_patterns(p: Product, case_sensitive: bool) -> _ProductPattern:
+    flags = 0 if case_sensitive else re.I
+    if p.brand_only:
+        return _ProductPattern(p.brand, p.name, True, [])
+    items = [p.name] + p.aliases
+    pats = [re.compile(r"\b" + flexible_token_regex(it) + r"\b", flags=flags) for it in items if it]
+    return _ProductPattern(p.brand, p.name, False, pats)
 
 # ----------------------------
 # Main logic
@@ -337,21 +373,26 @@ if run:
                 st.stop()
         if not uploaded and pasted.strip():
             products = parse_pasted_products(pasted)
-
         if not products:
             st.error("Please provide at least one product or brand line (CSV or pasted lines).")
             st.stop()
 
-        # Build brand patterns and a catalog of product patterns by brand
+        ignore_words = {w.strip().lower() for w in ignore_words_text.split(",") if w.strip()}
+        other_brands = {w.strip().lower() for w in other_brands_text.split(",") if w.strip()}
+
+        # Build brand + product patterns
         brand_patterns: dict[str, re.Pattern] = {}
         for p in products:
             if p.brand not in brand_patterns:
                 brand_patterns[p.brand] = compile_brand_pattern(p.brand, search_case_sensitive)
 
         catalog_patterns: dict[str, list[tuple[str, re.Pattern]]] = {}
+        compiled_products: list[_ProductPattern] = []
         for p in products:
+            pp = product_patterns(p, search_case_sensitive)
+            compiled_products.append(pp)
             if not p.brand_only and p.name:
-                for pat in p.product_patterns(search_case_sensitive):
+                for pat in pp.pats:
                     catalog_patterns.setdefault(p.brand, []).append((p.name, pat))
 
         st.info("Indexing your site(s)…")
@@ -401,7 +442,12 @@ if run:
                 urls = list(sorted(visited))
                 st.write(f"• Crawled URLs: {len(urls)}")
 
-            patterns = [p.strip() for p in (exclude_patterns or "").split(",") if p.strip()]
+            # Compute exclusions
+            patterns = []
+            if common_excludes_checked:
+                patterns.extend(["/tag/", "/category/", "/page/", "/feed/"])
+            if custom_excludes:
+                patterns.extend([p.strip() for p in custom_excludes.split(",") if p.strip()])
             if patterns:
                 before = len(urls)
                 urls = [u for u in urls if not any(pat in u for pat in patterns)]
@@ -423,58 +469,56 @@ if run:
 
             rows = []
 
-            # Structured/semantic signals
             jd_pairs = jsonld_products(html) if auto_detect else []
             title = title_guess(html) if auto_detect else ""
 
-            for p in products:
+            for pp in compiled_products:
                 # Brand-only
-                if p.brand_only:
-                    bp = brand_patterns.get(p.brand)
+                if pp.brand_only:
+                    bp = brand_patterns.get(pp.brand)
                     if bp and bp.search(text):
                         hit_products = set()
-                        # Catalog matches
-                        for pname, pat in catalog_patterns.get(p.brand, []):
+                        # 1) Catalog (from any provided product lines)
+                        for pname, pat in catalog_patterns.get(pp.brand, []):
                             if pat.search(text):
                                 hit_products.add(pname)
-                        # JSON-LD brand products
+                        # 2) JSON-LD product with exact brand
                         if not hit_products and jd_pairs:
                             for bname, pname in jd_pairs:
-                                if bp.search(bname or "") and pname:
+                                if (bname or "").lower() == pp.brand.lower():
                                     hit_products.add(pname.strip())
-                        # Title fallback
+                        # 3) Title fallback
                         if not hit_products and title and bp.search(title):
-                            hit_products.add(clean_product_phrase(p.brand, title))
-                        # Text heuristics (NEW)
-                        if auto_detect and len(hit_products) == 0:
-                            for ph in detect_products_from_text(text, p.brand, max_per_page=max_names):
+                            c = clean_phrase(title)
+                            if valid_product_name(c, ignore_words, other_brands):
+                                hit_products.add(c)
+                        # 4) Text heuristics (same-sentence)
+                        if auto_detect and (strict_mode or not hit_products):
+                            for ph in detect_products_from_text(text, pp.brand, max_per_page=max_names,
+                                                               ignore_words=ignore_words, other_brands=other_brands):
                                 hit_products.add(ph)
 
                         if not hit_products:
-                            rows.append({"brand": p.brand, "product": "(any)", "url": url})
+                            rows.append({"brand": pp.brand, "product": "(any)", "url": url})
                         else:
                             for pname in sorted(hit_products):
-                                rows.append({"brand": p.brand, "product": pname, "url": url})
+                                rows.append({"brand": pp.brand, "product": pname, "url": url})
                     continue
 
-                # Product search (brand + product, or product-only)
-                pats = [pat for pat in catalog_patterns.get(p.brand, []) if pat[0] == p.name]
-                if not pats:
-                    pats = [(p.name, pat) for pat in p.product_patterns(search_case_sensitive)]
-                product_hit = any(pat.search(text) for _name, pat in pats)
-
-                if product_hit:
-                    out_brand = p.brand
-                    if (out_brand == "Unknown" or not require_brand_match) and auto_detect:
+                # Product search
+                prod_ok = any(pat.search(text) for pat in pp.pats)
+                if prod_ok:
+                    out_brand = pp.brand
+                    if (out_brand == "Unknown" or not require_brand_match) and jd_pairs:
                         for bname, pname in jd_pairs:
-                            if pname and any(pat.search(pname) for _n, pat in pats):
+                            if pname and any(pat.search(pname) for pat in pp.pats):
                                 out_brand = bname or out_brand
                                 break
                     if require_brand_match:
-                        bp = brand_patterns.get(p.brand)
+                        bp = brand_patterns.get(pp.brand)
                         if bp and not bp.search(text):
                             continue
-                    rows.append({"brand": out_brand or p.brand, "product": p.name, "url": url})
+                    rows.append({"brand": out_brand or pp.brand, "product": pp.name, "url": url})
 
             return rows
 

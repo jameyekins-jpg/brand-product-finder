@@ -1,6 +1,5 @@
-
-Brand/Product Page Finder — v1.6
-- Brand-only pages now auto-extract product names from TEXT when JSON-LD/title don't have them.
-- Heuristics: "Brand + Product Name" and "Product Name by Brand" with cleanup (e.g., remove "review").
-- Limit how many product names per page are recorded (slider).
-- Keeps grouping: Brand → Product → URLs + CSV exports.
+Brand/Product Page Finder — v1.8
+- NEW: 'Exclude common paths (/tag/, /category/, /page/, /feed/)' checkbox (pre-checked).
+- Merges any additional custom exclusions you type.
+- Minor robustness fix for 'Require brand & product' in product-only searches.
+- Keeps strict brand proximity + ignore lists from v1.7.
