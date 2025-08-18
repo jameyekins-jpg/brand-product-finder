@@ -1,7 +1,1 @@
-Brand/Product Page Finder — v2.0
-- NEW 'Summary (WITH URLs) CSV' — one row per product with pipe-separated URLs + page counts.
-- Much stricter brand-only detection:
-  • Avoids phrases starting with numbers; splits on commas to prevent list bleed.
-  • Optional 'Product name must include brand word' (ON by default).
-  • Safer tokenization & stopword trimming; ignores other brand names you list.
-- Keeps results for 1–30 minutes (slider).
+v2.1 placeholder changelog
