@@ -1,6 +1,7 @@
-Brand/Product Page Finder — v1.9
-- Results persist in session for 10 minutes by default (configurable). Cached results include a direct CSV (with URLs).
-- Download button label clarified: 'full results (with URLs)' vs 'summary (no URLs)'.
-- Stronger product-name cleanup: trims trailing lower-case/stopwords ('actually', 'has', 'lowest entrance', etc.).
-- Canonicalization: if a detected phrase contains a known product name/alias for the brand, it snaps to the canonical name.
-- One row per (brand, product, URL) guaranteed (de-duplication).
+Brand/Product Page Finder — v2.0
+- NEW 'Summary (WITH URLs) CSV' — one row per product with pipe-separated URLs + page counts.
+- Much stricter brand-only detection:
+  • Avoids phrases starting with numbers; splits on commas to prevent list bleed.
+  • Optional 'Product name must include brand word' (ON by default).
+  • Safer tokenization & stopword trimming; ignores other brand names you list.
+- Keeps results for 1–30 minutes (slider).

@@ -22,7 +22,7 @@ st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 # Helpers
 # ----------------------------
 
-USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/1.9; +https://example.com)"
+USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/2.0; +https://example.com)"
 DEFAULT_TIMEOUT = 15
 
 def fetch(url: str) -> t.Optional[str]:
@@ -158,19 +158,28 @@ def jsonld_products(html: str) -> t.List[tuple[str,str]]:
         pass
     return out
 
+STOPWORDS = {"and","or","with","for","to","the","a","an","in","on","of","by"}
 GENERIC_BAD_TOKENS = {"guide","beginners","beginner","best","top","vs","comparison","compare","review","reviews","let","peace",
                       "how","why","what","actually","really","lowest","entrance","ultimate","complete","2020","2021","2022","2023","2024","2025"}
 
 def clean_phrase_tokens(s: str) -> str:
-    """Trim trailing lower-case phrases and common noise words; keep leading TitleCase tokens."""
+    """Trim trailing lower-case phrases and stop/garbage words; avoid starting digits."""
     s = s.strip(" -–—:|.,)™®(")
     tokens = s.split()
+    if not tokens:
+        return ""
+    # reject if first token is numeric
+    if tokens[0].isdigit():
+        return ""
     kept = []
     for tok in tokens:
-        if tok.lower() in GENERIC_BAD_TOKENS:
+        low = tok.lower()
+        if low in GENERIC_BAD_TOKENS or low in STOPWORDS:
             break
-        # stop if token is purely lowercase word (likely sentence continuation)
         if tok.isalpha() and tok.islower():
+            break
+        # stop at comma/semicolon markers (handled by sentence splitting but keep safe)
+        if any(ch in tok for ch in [",",";","/"]):
             break
         kept.append(tok)
     return " ".join(kept).strip(" -–—:|.,)™®(")
@@ -191,34 +200,47 @@ def title_guess(html: str) -> str:
     except Exception:
         return ""
 
-def detect_products_from_text(text: str, brand: str, max_per_page: int, ignore_words: set[str], other_brands: set[str]) -> t.List[str]:
+def detect_products_from_text(text: str, brand: str, max_per_page: int, require_brand_in_name: bool,
+                              ignore_words: set[str], other_brands: set[str]) -> t.List[str]:
+    """Return product candidates based on brand proximity and safer tokenization."""
     out = []
+    # Split into sentences by .,!,? then also split segments on commas to avoid lists
     sentences = re.split(r"(?<=[\.\!\?])\s+", text)
     brand_re = re.compile(rf"\b{re.escape(brand)}\b", re.I)
-    for s in sentences:
-        if not brand_re.search(s):
+    for sent in sentences:
+        if not brand_re.search(sent):
             continue
-        # Brand Product...
-        for m in re.finditer(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z0-9][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,6}})", s, flags=re.I):
-            phrase = clean_phrase_tokens(m.group(1))
-            if phrase:
+        for segment in re.split(r"\s*,\s*", sent):
+            if not brand_re.search(segment):
+                continue
+            # Brand Product (start with letter, not number)
+            for m in re.finditer(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,5}})", segment, flags=re.I):
+                phrase = clean_phrase_tokens(m.group(1))
+                if not phrase:
+                    continue
+                if require_brand_in_name and brand.lower() not in phrase.lower():
+                    # ensure brand prefix is actually part of phrase if required
+                    phrase = f"{brand} {phrase}"
                 out.append(phrase)
-        # Product by/from Brand
-        for m in re.finditer(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,6}})\s+(?:by|from)\s+{re.escape(brand)}\b", s, flags=re.I):
-            phrase = clean_phrase_tokens(m.group(1))
-            if phrase:
-                out.append(phrase)
+            # Product by/from Brand (optional if brand-in-name not required)
+            if not require_brand_in_name:
+                for m in re.finditer(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,5}})\s+(?:by|from)\s+{re.escape(brand)}\b", segment, flags=re.I):
+                    phrase = clean_phrase_tokens(m.group(1))
+                    if phrase:
+                        out.append(phrase)
         if len(out) >= max_per_page:
             break
-    # Dedup keep order
+    # Dedup/validate
     seen=set(); res=[]
     for p in out:
-        k=p.lower()
-        if k not in seen:
-            # quick validation
-            if len(p.split())>=2 and not any(w in p.lower() for w in other_brands) and not any(w in p.lower() for w in ignore_words):
-                seen.add(k); res.append(p)
-        if len(res)>=max_per_page:
+        pl = p.lower()
+        if any(ob in pl for ob in other_brands) or any(w in pl for w in ignore_words):
+            continue
+        if len(p.split()) < 2:
+            continue
+        if pl not in seen:
+            seen.add(pl); res.append(p)
+        if len(res) >= max_per_page:
             break
     return res
 
@@ -229,7 +251,7 @@ def detect_products_from_text(text: str, brand: str, max_per_page: int, ignore_w
 st.title("🔎 Brand & Product Page Finder")
 
 # persistence controls
-keep_minutes = st.slider("Keep results visible for (minutes)", 1, 30, 10, help="Results persist in your session for this long or until you run a new scan.")
+keep_minutes = st.slider("Keep results visible for (minutes)", 1, 30, 10)
 
 # expose cached results if present
 if "last_results" in st.session_state:
@@ -299,9 +321,11 @@ with col5:
     search_case_sensitive = st.checkbox("Case sensitive search", value=False)
 
 strict_mode = st.checkbox("Strict brand proximity (reduce wrong products)", value=True)
+require_brand_in_name = st.checkbox("Product name must include brand word (brand-only mode)", value=True,
+                                    help="Keeps only names like 'PetSafe Smart Feed'; turn off to also accept 'Smart Feed' near the brand.")
 ignore_words_text = st.text_input("Ignore product names containing these words (comma-separated)",
                                   value="guide,beginners,review,best,top,vs,comparison,peace,actually,lowest,entrance")
-other_brands_text = st.text_input("Other brands/words to ignore (comma-separated)", value="")
+other_brands_text = st.text_input("Other brands/words to ignore (comma-separated)", value="Pet Snowy,CatLink,Satellai")
 auto_detect = st.checkbox("Auto-detect product names from JSON-LD/title/text when possible", value=True)
 max_names = st.slider("Max detected product names per page", 1, 5, 3)
 run = st.button("Run Scan")
@@ -358,9 +382,8 @@ def parse_pasted_products(pasted: str) -> t.List[Product]:
             prods.append(Product(brand="Unknown", name=line, aliases=[], brand_only=False))
     return prods
 
-# Canonicalization: if a detected phrase contains any canonical product name/alias for the brand, snap to that canonical name.
+# Canonicalization
 def build_canonical_map(catalog_patterns: dict[str, list[tuple[str, re.Pattern]]]) -> dict[str, list[tuple[str, re.Pattern]]]:
-    # Already suitable; we'll reuse same patterns to search within phrases.
     return catalog_patterns
 
 def canonicalize_phrase(brand: str, phrase: str, canon_map: dict[str, list[tuple[str, re.Pattern]]]) -> str:
@@ -370,7 +393,7 @@ def canonicalize_phrase(brand: str, phrase: str, canon_map: dict[str, list[tuple
     return phrase
 
 # ----------------------------
-# Main logic
+# Main logic & output
 # ----------------------------
 def display_results(df: pd.DataFrame):
     st.markdown("### Results — grouped by Brand → Product → URLs")
@@ -383,6 +406,19 @@ def display_results(df: pd.DataFrame):
     out = io.StringIO(); df.to_csv(out, index=False)
     st.download_button("Download full results (with URLs) CSV", out.getvalue(), file_name="brand_product_pages.csv", mime="text/csv", key="full")
 
+    # Summary WITH URLs (one row per product with pipes)
+    summary_urls = (
+        df.groupby(["brand","product"])["url"]
+          .apply(lambda s: "|".join(sorted(set(s))))
+          .reset_index(name="urls")
+    )
+    summary_urls["pages_found"] = summary_urls["urls"].apply(lambda u: 0 if not u else u.count("|")+1)
+    st.markdown("**Summary (one row per product, with URLs):**")
+    st.dataframe(summary_urls, use_container_width=True)
+    out3 = io.StringIO(); summary_urls.to_csv(out3, index=False)
+    st.download_button("Download summary (WITH URLs) CSV", out3.getvalue(), file_name="brand_product_summary_with_urls.csv", mime="text/csv", key="sum_with_urls")
+
+    # Summary without URLs (counts only)
     summary = (
         df.groupby(["brand", "product"])["url"]
         .nunique()
@@ -392,7 +428,7 @@ def display_results(df: pd.DataFrame):
     st.markdown("**Summary (unique pages per product):**")
     st.dataframe(summary, use_container_width=True)
     out2 = io.StringIO(); summary.to_csv(out2, index=False)
-    st.download_button("Download summary (no URLs) CSV", out2.getvalue(), file_name="brand_product_summary.csv", mime="text/csv", key="sum")
+    st.download_button("Download summary (no URLs) CSV", out2.getvalue(), file_name="brand_product_summary.csv", mime="text/csv", key="sum_no_urls")
 
 if run:
     try:
@@ -498,7 +534,7 @@ if run:
         all_urls = [u for urls in site_urls.values() for u in urls]
 
         results: t.List[dict] = []
-        seen = set()  # dedupe brand+product+url
+        seen = set()  # de-dup brand,product,url
 
         def scan_url(url: str):
             html = fetch(url)
@@ -517,11 +553,11 @@ if run:
                     bp = brand_patterns.get(pp.brand)
                     if bp and bp.search(text):
                         hit_products = set()
-                        # 1) Catalog (from provided product lines)
+                        # 1) Catalog matches
                         for pname, pat in catalog_patterns.get(pp.brand, []):
                             if pat.search(text):
                                 hit_products.add(pname)
-                        # 2) JSON-LD product with exact brand
+                        # 2) JSON-LD brand products
                         if not hit_products and jd_pairs:
                             for bname, pname in jd_pairs:
                                 if (bname or "").lower() == pp.brand.lower():
@@ -531,11 +567,11 @@ if run:
                             c = clean_phrase_tokens(title)
                             if c:
                                 hit_products.add(c)
-                        # 4) Text heuristics (same-sentence)
+                        # 4) Text heuristics
                         if auto_detect and (strict_mode or not hit_products):
                             for ph in detect_products_from_text(text, pp.brand, max_per_page=max_names,
+                                                               require_brand_in_name=require_brand_in_name,
                                                                ignore_words=ignore_words, other_brands=other_brands):
-                                # canonicalize if phrase contains a known product name
                                 ph2 = canonicalize_phrase(pp.brand, ph, canon_map)
                                 hit_products.add(ph2)
 
@@ -579,7 +615,6 @@ if run:
             st.warning("No matches found. For brand-only, add a line like 'PetSafe,'. For product-only, paste just the product name. Add aliases to catch variants.")
         else:
             df = pd.DataFrame(results).sort_values(["brand", "product", "url"])
-            # persist to session for keep_minutes
             st.session_state["last_results"] = {"rows": df.to_dict(orient="records"), "ts": time.time(), "ttl": keep_minutes*60}
             st.success(f"Found {len(df)} matches — results will be saved here for {keep_minutes} minutes unless you run another scan.")
             display_results(df)
