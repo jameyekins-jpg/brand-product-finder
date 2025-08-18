@@ -22,7 +22,7 @@ st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 # Helpers
 # ----------------------------
 
-USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/1.5; +https://example.com)"
+USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/1.6; +https://example.com)"
 DEFAULT_TIMEOUT = 15
 
 def fetch(url: str) -> t.Optional[str]:
@@ -162,7 +162,7 @@ def parse_pasted_products(pasted: str) -> t.List[Product]:
             prods.append(Product(brand="Unknown", name=line, aliases=[], brand_only=False))
     return prods
 
-# --- Product autodetection from HTML ---
+# --- Product autodetection ---
 
 def jsonld_products(html: str) -> t.List[tuple[str,str]]:
     """Return list of (brand, product_name) from JSON-LD Product nodes if present."""
@@ -192,6 +192,45 @@ def jsonld_products(html: str) -> t.List[tuple[str,str]]:
     except Exception:
         pass
     return out
+
+GENERIC_ENDINGS = re.compile(r"(?:\s+(?:review|guide|how to|best|top|vs\.?|comparison|overview|202\d|20\d{2}))+$", re.I)
+
+def clean_product_phrase(brand: str, phrase: str) -> str:
+    s = phrase.strip(" -–—:|.,)™® ")
+    s = re.sub(GENERIC_ENDINGS, "", s).strip(" -–—:|.,)™® ")
+    # remove leading brand
+    if s.lower().startswith(brand.lower() + " "):
+        s = s[len(brand)+1:].strip()
+    return s
+
+def detect_products_from_text(text: str, brand: str, max_per_page: int = 3) -> t.List[str]:
+    """Heuristics to pull product names that co-occur with the brand in raw text."""
+    out = []
+    # Pattern 1: "Brand Product Name ..."
+    p1 = re.compile(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z0-9][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,7}})", re.I)
+    # Pattern 2: "Product Name by Brand"
+    p2 = re.compile(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,7}})\s+(?:by|from)\s+{re.escape(brand)}\b", re.I)
+
+    for m in p1.finditer(text):
+        phrase = clean_product_phrase(brand, m.group(1))
+        if len(phrase.split()) >= 2:
+            out.append(phrase)
+    for m in p2.finditer(text):
+        phrase = clean_product_phrase(brand, m.group(1))
+        if len(phrase.split()) >= 2:
+            out.append(phrase)
+
+    # De-dup while keeping order
+    seen = set()
+    res = []
+    for p in out:
+        key = p.lower()
+        if key not in seen:
+            seen.add(key)
+            res.append(p)
+        if len(res) >= max_per_page:
+            break
+    return res
 
 def title_guess(html: str) -> str:
     try:
@@ -275,7 +314,8 @@ with col5:
     require_brand_match = st.checkbox("Require brand & product on page", value=False)
 
 search_case_sensitive = st.checkbox("Case sensitive search", value=False)
-auto_detect = st.checkbox("Auto-detect product names from JSON-LD/title when possible", value=True)
+auto_detect = st.checkbox("Auto-detect product names from JSON-LD/title/text when possible", value=True)
+max_names = st.slider("Max detected product names per page", 1, 5, 3)
 run = st.button("Run Scan")
 
 # ----------------------------
@@ -383,28 +423,32 @@ if run:
 
             rows = []
 
-            # Try JSON-LD products on page
+            # Structured/semantic signals
             jd_pairs = jsonld_products(html) if auto_detect else []
             title = title_guess(html) if auto_detect else ""
 
             for p in products:
-                # Brand-only line: list URLs under detected product names, if any
+                # Brand-only
                 if p.brand_only:
                     bp = brand_patterns.get(p.brand)
                     if bp and bp.search(text):
-                        # Catalog patterns first
                         hit_products = set()
+                        # Catalog matches
                         for pname, pat in catalog_patterns.get(p.brand, []):
                             if pat.search(text):
                                 hit_products.add(pname)
-                        # JSON-LD products for this brand
+                        # JSON-LD brand products
                         if not hit_products and jd_pairs:
                             for bname, pname in jd_pairs:
                                 if bp.search(bname or "") and pname:
                                     hit_products.add(pname.strip())
                         # Title fallback
                         if not hit_products and title and bp.search(title):
-                            hit_products.add(title.strip())
+                            hit_products.add(clean_product_phrase(p.brand, title))
+                        # Text heuristics (NEW)
+                        if auto_detect and len(hit_products) == 0:
+                            for ph in detect_products_from_text(text, p.brand, max_per_page=max_names):
+                                hit_products.add(ph)
 
                         if not hit_products:
                             rows.append({"brand": p.brand, "product": "(any)", "url": url})
@@ -449,14 +493,14 @@ if run:
         if not results:
             st.warning("No matches found. For brand-only, add a line like 'PetSafe,'. For product-only, paste just the product name. Add aliases to catch variants.")
         else:
-            # Display grouped view
             st.success(f"Found {len(results)} mentions.")
             df = pd.DataFrame(results).sort_values(["brand", "product", "url"])
+
             st.markdown("### Results — grouped by Brand → Product → URLs")
             for (brand, product), sub in df.groupby(["brand", "product"]):
                 with st.expander(f"{brand} › {product}  ({len(sub)} page{'s' if len(sub)!=1 else ''})", expanded=False):
                     st.dataframe(sub[["url"]], use_container_width=True, hide_index=True)
-            # Also show flat table + downloads
+
             st.markdown("### Full table")
             st.dataframe(df, use_container_width=True)
             out = io.StringIO(); df.to_csv(out, index=False)

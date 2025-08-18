@@ -1,4 +1,6 @@
-Brand/Product Page Finder — v1.5
-- Brand-only lines group results under detected Product names when possible.
-- Product-only lines supported with brand auto-detection from JSON-LD when available.
-- Results grouped Brand → Product → URLs with CSV exports.
+
+Brand/Product Page Finder — v1.6
+- Brand-only pages now auto-extract product names from TEXT when JSON-LD/title don't have them.
+- Heuristics: "Brand + Product Name" and "Product Name by Brand" with cleanup (e.g., remove "review").
+- Limit how many product names per page are recorded (slider).
+- Keeps grouping: Brand → Product → URLs + CSV exports.
