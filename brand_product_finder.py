@@ -2,6 +2,7 @@
 import re
 import io
 import csv
+import json
 import time
 import queue
 import typing as t
@@ -21,7 +22,7 @@ st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 # Helpers
 # ----------------------------
 
-USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/1.4; +https://example.com)"
+USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/1.5; +https://example.com)"
 DEFAULT_TIMEOUT = 15
 
 def fetch(url: str) -> t.Optional[str]:
@@ -106,6 +107,7 @@ def get_text_content(html: str) -> str:
     return text
 
 def flexible_token_regex(s: str) -> str:
+    # spaces/hyphens/underscores/slashes interchangeable
     return re.escape(s).replace(r"\ ", r"[ \u00A0\-\_/]*")
 
 @dataclass
@@ -142,6 +144,7 @@ def parse_csv_products(file_bytes: bytes) -> t.List[Product]:
     return prods
 
 def parse_pasted_products(pasted: str) -> t.List[Product]:
+    # Accepts: Brand,Product,Alias1|Alias2  | Brand,Product  | Brand,  | Product
     prods: t.List[Product] = []
     for raw in pasted.splitlines():
         line = raw.strip()
@@ -159,6 +162,53 @@ def parse_pasted_products(pasted: str) -> t.List[Product]:
             prods.append(Product(brand="Unknown", name=line, aliases=[], brand_only=False))
     return prods
 
+# --- Product autodetection from HTML ---
+
+def jsonld_products(html: str) -> t.List[tuple[str,str]]:
+    """Return list of (brand, product_name) from JSON-LD Product nodes if present."""
+    out = []
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup.find_all("script", {"type":"application/ld+json"}):
+            try:
+                data = json.loads(tag.string or "")
+            except Exception:
+                continue
+            nodes = data if isinstance(data, list) else [data]
+            for n in nodes:
+                if isinstance(n, dict):
+                    tval = n.get("@type")
+                    types = [tval] if isinstance(tval, str) else (tval or [])
+                    if "Product" in types or (isinstance(types, list) and any(t for t in types if isinstance(t,str) and t.lower()=="product")):
+                        name = (n.get("name") or "").strip()
+                        b = n.get("brand")
+                        bname = ""
+                        if isinstance(b, dict):
+                            bname = (b.get("name") or "").strip()
+                        elif isinstance(b, str):
+                            bname = b.strip()
+                        if name:
+                            out.append((bname or "Unknown", name))
+    except Exception:
+        pass
+    return out
+
+def title_guess(html: str) -> str:
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        og = soup.find("meta", property="og:title")
+        if og and og.get("content"):
+            return og["content"].strip()
+        tw = soup.find("meta", attrs={"name":"twitter:title"})
+        if tw and tw.get("content"):
+            return tw["content"].strip()
+        h1 = soup.find("h1")
+        if h1 and h1.get_text(strip=True):
+            return h1.get_text(strip=True)
+        return ""
+    except Exception:
+        return ""
+
 # ----------------------------
 # UI
 # ----------------------------
@@ -168,13 +218,6 @@ st.write("Find where your brands and products are mentioned across your site(s).
 
 with st.expander("How it works & Input Examples", expanded=False):
     st.markdown("""
-**What this does**
-- Reads your **sitemap(s)** (or crawls if none found)
-- Scans pages for **brand and/or product** mentions
-- Outputs **Product → URLs** and a **summary CSV**
-
-**Add products (two options)**
-
 **Option 1 — Upload CSV** (columns must be exactly):
 ```
 brand,product,aliases
@@ -184,12 +227,12 @@ brand,product,aliases
 - **aliases** *(optional)* → Alternate names, separated by `|` (e.g., `Litter Robot 4|LR4`)
 
 **Option 2 — Paste lines (one per line)**
-Formats accepted:
+Accepted:
 ```
 Brand,Product,Alias1|Alias2
 Brand,Product
 Brand,          # Brand-only (find any page with this brand)
-Product         # Product-only (brand will be set to 'Unknown')
+Product         # Product-only (brand auto-detected if possible)
 ```
 Examples:
 ```
@@ -215,29 +258,28 @@ pasted_ph = (
 "Litter-Robot 4                   # Product-only"
 )
 pasted = st.text_area("Or paste products (one per line: Brand,Product,alias1|alias2)", height=180, placeholder=pasted_ph)
-
 st.markdown("**Tip:** Add common aliases (e.g., `Litter-Robot 4|Litter Robot 4|LR4`) to improve matching.")
 
-colC, colD, colE = st.columns([1,1,1])
-with colC:
-    delay_s = st.number_input("Delay between requests (seconds)", min_value=0.0, max_value=2.0, value=0.1, step=0.1,
-                              help="Lower = faster but heavier on your server. Try 0.0–0.2 for speed.")
-with colD:
-    max_workers = st.slider("Parallel requests", min_value=1, max_value=16, value=8, help="Higher = faster. If your server slows down, lower this.")
-with colE:
+col1, col2, col3 = st.columns([1,1,1])
+with col1:
+    delay_s = st.number_input("Delay between requests (seconds)", min_value=0.0, max_value=2.0, value=0.1, step=0.1)
+with col2:
+    max_workers = st.slider("Parallel requests", min_value=1, max_value=16, value=8)
+with col3:
     stop_after = st.number_input("Stop after N pages per product (0 = no limit)", min_value=0, max_value=1000, value=0)
 
-colF, colG = st.columns([2,1])
-with colF:
+col4, col5 = st.columns([2,1])
+with col4:
     exclude_patterns = st.text_input("Exclude URL patterns (comma-separated)", placeholder="/tag/, /category/, /page/, /feed/")
-with colG:
-    require_brand_match = st.checkbox("Require brand & product on page", value=False, help="Only count a page if BOTH appear. (Ignored for brand-only lines.)")
+with col5:
+    require_brand_match = st.checkbox("Require brand & product on page", value=False)
 
 search_case_sensitive = st.checkbox("Case sensitive search", value=False)
+auto_detect = st.checkbox("Auto-detect product names from JSON-LD/title when possible", value=True)
 run = st.button("Run Scan")
 
 # ----------------------------
-# Main logic with safer memory + error surfacing
+# Main logic
 # ----------------------------
 if run:
     try:
@@ -260,15 +302,20 @@ if run:
             st.error("Please provide at least one product or brand line (CSV or pasted lines).")
             st.stop()
 
-        # Compile patterns
+        # Build brand patterns and a catalog of product patterns by brand
         brand_patterns: dict[str, re.Pattern] = {}
         for p in products:
             if p.brand not in brand_patterns:
                 brand_patterns[p.brand] = compile_brand_pattern(p.brand, search_case_sensitive)
 
+        catalog_patterns: dict[str, list[tuple[str, re.Pattern]]] = {}
+        for p in products:
+            if not p.brand_only and p.name:
+                for pat in p.product_patterns(search_case_sensitive):
+                    catalog_patterns.setdefault(p.brand, []).append((p.name, pat))
+
         st.info("Indexing your site(s)…")
 
-        # Gather URLs per site
         site_urls: dict[str, t.List[str]] = {}
         for base in bases:
             st.write(f"**Indexing:** {base}")
@@ -314,7 +361,6 @@ if run:
                 urls = list(sorted(visited))
                 st.write(f"• Crawled URLs: {len(urls)}")
 
-            # Apply exclusions
             patterns = [p.strip() for p in (exclude_patterns or "").split(",") if p.strip()]
             if patterns:
                 before = len(urls)
@@ -323,71 +369,97 @@ if run:
 
             site_urls[base] = urls
 
-        # Prepare product patterns once
-        product_patterns: dict[tuple, t.List[re.Pattern]] = {}
-        for p in products:
-            product_patterns[(p.brand, p.name, p.brand_only)] = p.product_patterns(search_case_sensitive)
-
         st.info("Scanning pages…")
         all_urls = [u for urls in site_urls.values() for u in urls]
-        results: t.List[dict] = []
-        seen_pairs = set()
-        per_product_counts: dict[tuple, int] = {}
 
-        progress = st.progress(0.0, text=f"0 / {len(all_urls)}")
+        results: t.List[dict] = []
+        seen = set()
 
         def scan_url(url: str):
-            html = fetch(url)  # no caching to save memory
+            html = fetch(url)
             if not html:
                 return []
             text = get_text_content(html)
-            found = []
+
+            rows = []
+
+            # Try JSON-LD products on page
+            jd_pairs = jsonld_products(html) if auto_detect else []
+            title = title_guess(html) if auto_detect else ""
+
             for p in products:
-                key_pp = (p.brand, p.name, p.brand_only)
+                # Brand-only line: list URLs under detected product names, if any
                 if p.brand_only:
                     bp = brand_patterns.get(p.brand)
                     if bp and bp.search(text):
-                        key = (p.brand, "(any)", url)
-                        if key not in seen_pairs:
-                            found.append({"brand": p.brand, "product": "(any)", "url": url})
+                        # Catalog patterns first
+                        hit_products = set()
+                        for pname, pat in catalog_patterns.get(p.brand, []):
+                            if pat.search(text):
+                                hit_products.add(pname)
+                        # JSON-LD products for this brand
+                        if not hit_products and jd_pairs:
+                            for bname, pname in jd_pairs:
+                                if bp.search(bname or "") and pname:
+                                    hit_products.add(pname.strip())
+                        # Title fallback
+                        if not hit_products and title and bp.search(title):
+                            hit_products.add(title.strip())
+
+                        if not hit_products:
+                            rows.append({"brand": p.brand, "product": "(any)", "url": url})
+                        else:
+                            for pname in sorted(hit_products):
+                                rows.append({"brand": p.brand, "product": pname, "url": url})
                     continue
 
-                brand_ok = True
-                if require_brand_match:
-                    bp = brand_patterns.get(p.brand)
-                    brand_ok = bool(bp.search(text)) if bp else False
+                # Product search (brand + product, or product-only)
+                pats = [pat for pat in catalog_patterns.get(p.brand, []) if pat[0] == p.name]
+                if not pats:
+                    pats = [(p.name, pat) for pat in p.product_patterns(search_case_sensitive)]
+                product_hit = any(pat.search(text) for _name, pat in pats)
 
-                pats = product_patterns[key_pp]
-                prod_ok = any(pt.search(text) for pt in pats)
+                if product_hit:
+                    out_brand = p.brand
+                    if (out_brand == "Unknown" or not require_brand_match) and auto_detect:
+                        for bname, pname in jd_pairs:
+                            if pname and any(pat.search(pname) for _n, pat in pats):
+                                out_brand = bname or out_brand
+                                break
+                    if require_brand_match:
+                        bp = brand_patterns.get(p.brand)
+                        if bp and not bp.search(text):
+                            continue
+                    rows.append({"brand": out_brand or p.brand, "product": p.name, "url": url})
 
-                if prod_ok and brand_ok:
-                    key = (p.brand, p.name, url)
-                    if key not in seen_pairs:
-                        found.append({"brand": p.brand, "product": p.name, "url": url})
-            return found
+            return rows
 
         processed = 0
+        progress = st.progress(0.0, text=f"0 / {len(all_urls)}")
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             for out in ex.map(scan_url, all_urls, chunksize=1):
-                if out:
-                    for row in out:
-                        key = (row["brand"], row["product"], row["url"])
-                        if key not in seen_pairs:
-                            seen_pairs.add(key)
-                            results.append(row)
-                            key_pp = (row["brand"], row["product"])
-                            per_product_counts[key_pp] = per_product_counts.get(key_pp, 0) + 1
+                for row in out:
+                    key = (row["brand"], row["product"], row["url"])
+                    if key not in seen:
+                        seen.add(key)
+                        results.append(row)
                 processed += 1
                 progress.progress(min(processed / max(len(all_urls), 1), 1.0), text=f"{processed} / {len(all_urls)}")
 
         if not results:
-            st.warning("No matches found. For brand-only, add a line like 'PetSafe,'. For product searches, add aliases or uncheck 'Require brand & product'.")
+            st.warning("No matches found. For brand-only, add a line like 'PetSafe,'. For product-only, paste just the product name. Add aliases to catch variants.")
         else:
+            # Display grouped view
             st.success(f"Found {len(results)} mentions.")
             df = pd.DataFrame(results).sort_values(["brand", "product", "url"])
+            st.markdown("### Results — grouped by Brand → Product → URLs")
+            for (brand, product), sub in df.groupby(["brand", "product"]):
+                with st.expander(f"{brand} › {product}  ({len(sub)} page{'s' if len(sub)!=1 else ''})", expanded=False):
+                    st.dataframe(sub[["url"]], use_container_width=True, hide_index=True)
+            # Also show flat table + downloads
+            st.markdown("### Full table")
             st.dataframe(df, use_container_width=True)
-            out = io.StringIO()
-            df.to_csv(out, index=False)
+            out = io.StringIO(); df.to_csv(out, index=False)
             st.download_button("Download CSV", out.getvalue(), file_name="brand_product_pages.csv", mime="text/csv")
 
             summary = (
@@ -398,12 +470,12 @@ if run:
             )
             st.markdown("**Summary (unique pages per product):**")
             st.dataframe(summary, use_container_width=True)
-            out2 = io.StringIO()
-            summary.to_csv(out2, index=False)
+            out2 = io.StringIO(); summary.to_csv(out2, index=False)
             st.download_button("Download Summary CSV", out2.getvalue(), file_name="brand_product_summary.csv", mime="text/csv")
+
     except Exception as e:
-        st.error("The app hit an error while running. See details below and consider reducing parallel requests or exclusions.")
+        st.error("The app hit an error while running.")
         st.exception(e)
 
 st.markdown("---")
-st.caption("Use brand-only lines like 'PetSafe,' to list every page that mentions that brand.")
+st.caption("Use brand-only lines like 'PetSafe,' to list every page that mentions that brand. Product-only lines are supported too.")
