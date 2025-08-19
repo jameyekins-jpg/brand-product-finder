@@ -397,7 +397,7 @@ with col2:
 with col3:
     stop_after = st.number_input("Stop after N pages per product (0 = no limit)", min_value=0, max_value=1000, value=0)
 
-common_excludes_checked = st.checkbox("Exclude common paths (/tag/, /category/, /page/, /feed/, /reviews/)", value=True)
+common_excludes_checked = st.checkbox("Exclude common paths (/tag/, /category/, /page/, /feed/, /reviews/, /author/)", value=True)
 custom_excludes = st.text_input("Additional URL patterns to exclude (comma-separated)", value="")
 
 col4, col5 = st.columns([2,1])
@@ -414,7 +414,7 @@ ignore_words_text = st.text_input("Ignore product names containing these words (
                                   value="guide,beginners,review,best,top,vs,comparison,peace,actually,lowest,entrance")
 other_brands_text = st.text_input("Other brands/words to ignore (comma-separated)", value="Pet Snowy,CatLink,Satellai")
 auto_detect = st.checkbox("Auto-detect product names from JSON-LD/title/text when possible", value=True)
-max_names = st.slider("Max detected product names per page", 1, 12, 8)  # default higher
+max_names = st.slider("Max detected product names per page", 1, 20, 12)  # default higher
 run = st.button("Run Scan")
 
 # ----------------------------
@@ -591,7 +591,7 @@ if run:
 
             patterns = []
             if common_excludes_checked:
-                patterns.extend(["/tag/", "/category/", "/page/", "/feed/", "/reviews/"])
+                patterns.extend(["/tag/", "/category/", "/page/", "/feed/", "/reviews/", "/author/"])
             if custom_excludes:
                 patterns.extend([p.strip() for p in custom_excludes.split(",") if p.strip()])
             if patterns:
