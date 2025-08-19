@@ -16,7 +16,7 @@ import streamlit as st
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
-BUILD_VERSION = "2.5.1"
+BUILD_VERSION = "2.6.0"
 
 st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 
@@ -180,7 +180,7 @@ def jsonld_products(html: str) -> t.List[tuple[str,str]]:
 
 STOPWORDS = {"and","or","with","for","to","the","a","an","in","on","of","by"}
 GENERIC_BAD_TOKENS = {"guide","beginners","beginner","best","top","vs","comparison","compare","review","reviews","let","peace",
-                      "how","why","what","actually","really","lowest","entrance","ultimate","complete","2020","2021","2022","2023","2024","2025"}
+                      "how","why","what","actually","really","lowest","entrance","ultimate","complete","2020","2021","2022","2023","2024","2025","and","or","vs","/","|","&",":"}
 
 def clean_phrase_tokens(s: str) -> str:
     s = s.strip(" -–—:|.,)™®(")
@@ -221,14 +221,79 @@ def title_guess(html: str) -> str:
     return ""
 
 # Full implementation (text-based)
+
+def detect_other_brands_on_page(html: str, text: str, target_brand: str) -> set[str]:
+    """
+    Infer competitor/other brand names on the page so we can ignore phrases that include them.
+    - Pull brands from JSON-LD Product blocks
+    - Find "by Brand" / "from Brand" patterns
+    - Heuristic: capitalized 1–3 word tokens that look like brand names
+    Returns a lowercase set, excluding the target brand.
+    """
+    found = set()
+
+    # JSON-LD brands
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup.find_all("script", {"type":"application/ld+json"}):
+            try:
+                data = json.loads(tag.string or "")
+            except Exception:
+                continue
+            nodes = data if isinstance(data, list) else [data]
+            for n in nodes:
+                if isinstance(n, dict):
+                    tval = n.get("@type")
+                    types = [tval] if isinstance(tval, str) else (tval or [])
+                    is_product = False
+                    if isinstance(types, list):
+                        for _t in types:
+                            if isinstance(_t, str) and _t.lower() == "product":
+                                is_product = True
+                                break
+                    elif isinstance(types, str) and types.lower() == "product":
+                        is_product = True
+                    if is_product:
+                        b = n.get("brand")
+                        if isinstance(b, dict):
+                            bname = (b.get("name") or "").strip()
+                        elif isinstance(b, str):
+                            bname = b.strip()
+                        else:
+                            bname = ""
+                        if bname:
+                            found.add(bname.lower())
+    except Exception:
+        pass
+
+    # "by Brand" / "from Brand"
+    for m in re.finditer(r"\b(?:by|from)\s+([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+){0,2})\b", text):
+        found.add(m.group(1).strip().lower())
+
+    # Capitalized brand-like tokens (single or double words)
+    for m in re.finditer(r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+){0,1})\b", text):
+        cand = m.group(1).strip()
+        # Drop obvious non-brands
+        bad = {"Best","Top","Guide","Review","Reviews","Setup","How","Why","What","With","For","And","Or","The","A","An"}
+        parts = cand.split()
+        if any(p in bad for p in parts):
+            continue
+        if len(cand) >= 3:
+            found.add(cand.lower())
+
+    # Normalize & exclude target brand
+    tb = target_brand.lower()
+    pruned = {b for b in found if tb not in b and b != tb}
+    return pruned
+
 def detect_products_from_text(text: str, brand: str, max_per_page: int, require_brand_in_name: bool,
                               ignore_words: set[str], other_brands: set[str]) -> t.List[str]:
     out = []
-    for m in re.finditer(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,6}})", text, flags=re.I):
+    for m in re.finditer(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,5}})", text, flags=re.I):
         phrase = clean_phrase_tokens(m.group(1))
         if phrase:
             out.append(phrase)
-    for m in re.finditer(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,6}})\s+(?:by|from)\s+{re.escape(brand)}\b", text, flags=re.I):
+    for m in re.finditer(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,5}})\s+(?:by|from)\s+{re.escape(brand)}\b", text, flags=re.I):
         phrase = clean_phrase_tokens(m.group(1))
         if phrase:
             out.append(phrase)
@@ -642,6 +707,7 @@ if run:
 
             rows = []
             jd_pairs = jsonld_products(html) if auto_detect else []
+            page_other_brands = detect_other_brands_on_page(html, text, pp.brand)
 
             for pp in compiled_products:
                 if pp.brand_only:
@@ -653,14 +719,17 @@ if run:
                                 hit_products.add(pname)
                         for bname, pname in jd_pairs:
                             if (bname or "").lower() == pp.brand.lower():
-                                hit_products.add(canonicalize_phrase(pp.brand, pname.strip(), canon_map, collapse_variants))
+                                pname_norm = pname.strip()
+                                # skip if contains any other brand token (auto or manual)
+                                if not any(ob in pname_norm.lower() for ob in (other_brands | page_other_brands)):
+                                    hit_products.add(canonicalize_phrase(pp.brand, pname_norm, canon_map, collapse_variants))
                         for ph in detect_products_from_html(html, pp.brand, max_per_page=max_names,
                                                             require_brand_in_name=require_brand_in_name,
-                                                            ignore_words=ignore_words, other_brands=other_brands):
+                                                            ignore_words=ignore_words, other_brands=(other_brands | page_other_brands)):
                             hit_products.add(canonicalize_phrase(pp.brand, ph, canon_map, collapse_variants))
                         for ph in detect_products_from_text(text, pp.brand, max_per_page=max_names,
                                                             require_brand_in_name=require_brand_in_name,
-                                                            ignore_words=ignore_words, other_brands=other_brands):
+                                                            ignore_words=ignore_words, other_brands=(other_brands | page_other_brands)):
                             hit_products.add(canonicalize_phrase(pp.brand, ph, canon_map, collapse_variants))
 
                         for pname in sorted(hit_products):
@@ -673,8 +742,9 @@ if run:
                     if (out_brand == "Unknown" or not require_brand_match) and jd_pairs:
                         for bname, pname in jd_pairs:
                             if pname and any(pat.search(pname) for pat in pp.pats):
-                                out_brand = bname or out_brand
-                                break
+                                if not any(ob in pname.lower() for ob in other_brands):
+                                    out_brand = bname or out_brand
+                                    break
                     if require_brand_match:
                         bp = brand_patterns.get(pp.brand)
                         if bp and not bp.search(text):
