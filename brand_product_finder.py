@@ -285,6 +285,17 @@ def product_canonical_display(brand: str, name: str) -> str:
     if s.lower().startswith(brand.lower() + " " + brand.lower()):
         s = s[len(brand)+1:]
     return s
+
+def normalize_text(text: str) -> str:
+    """
+    Normalize text for matching:
+      - Replace hyphens, dashes, underscores, NBSP with space
+      - Lowercase, collapse spaces
+    """
+    text = re.sub(r"[\u2010-\u2015\u2212\u00AD\u00A0_\-]+", " ", text)
+    text = text.lower()
+    return re.sub(r"\s+", " ", text).strip()
+
 def product_canonical_key(brand: str, name: str) -> str:
     s = product_canonical_display(brand, name).lower()
     s = re.sub(rf"\b{re.escape(brand.lower())}\b", "", s)
