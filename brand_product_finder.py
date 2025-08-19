@@ -292,47 +292,53 @@ def product_canonical_key(brand: str, name: str) -> str:
     return s
 
 
+
 def _dedupe_within_url(rows: list[dict]) -> list[dict]:
     """
-    Given rows [{'brand','product','url','title'}], collapse variants within the same brand+URL.
+    Collapse variants within the same brand+URL aggressively.
     Strategy:
-      - Build a normalized key: lowercase, remove brand word, strip non-alnum.
-      - Prefer the longest, most specific name per normalized key.
-      - Additionally, if one name is a substring of another (after removing brand), keep the longer.
+      - Group by (brand_lower, url).
+      - For each group, build token sets for the product name with the brand removed.
+      - Keep the entry whose token set is a strict superset of another (e.g., {'smartspin','litter','box'} supersets {'smartspin'}).
+      - If neither is a strict superset, prefer the longer display string.
     """
     from collections import defaultdict
+
+    def norm_tokens(name: str, brand_l: str) -> set[str]:
+        # remove brand occurrences then tokenize
+        s = re.sub(rf"\\b{re.escape(brand_l)}\\b", "", name.lower())
+        toks = re.findall(r"[a-z0-9]+", s)
+        # remove trivial words
+        drop = {"and","or","with","for","the","a","an","of","self","cleaning","review","box","boxes","litter"}
+        return {t for t in toks if t not in drop}
+
     grouped = defaultdict(list)
     for r in rows:
         grouped[(r["brand"].lower(), r["url"])].append(r)
 
     out = []
     for (brand_l, url), items in grouped.items():
-        # First pass: choose the "best" per normalized key
-        buckets = {}
+        candidates = []
         for it in items:
-            name = it["product"]
-            # normalize
-            norm = re.sub(rf"\b{re.escape(brand_l)}\b", "", name.lower())
-            norm = re.sub(r"[^a-z0-9 ]+", " ", norm)
-            norm = re.sub(r"\s+", " ", norm).strip()
-            key = re.sub(r"\s+", "", norm)
-            # pick best by length (more specific)
-            prev = buckets.get(key)
-            if prev is None or len(name) > len(prev["product"]):
-                buckets[key] = it
+            tokens = norm_tokens(it["product"], brand_l)
+            candidates.append((tokens, it))
 
-        # Second pass: if one surviving name is a substring of another, keep the longer
-        keep = list(buckets.values())
-        keep_names = [re.sub(rf"\b{re.escape(brand_l)}\b", "", k["product"].lower()).strip() for k in keep]
-        final = []
-        for i, it in enumerate(keep):
-            ni = keep_names[i]
-            longer_exists = any((i != j) and (ni in keep_names[j]) and (len(keep[j]["product"]) > len(it["product"])) for j in range(len(keep)))
-            if not longer_exists:
-                final.append(it)
+        # sort by (token_count desc, length desc) for deterministic choice
+        candidates.sort(key=lambda x: (len(x[0]), len(x[1]["product"])), reverse=True)
 
-        out.extend(final)
+        kept: list[tuple[set[str], dict]] = []
+        for tok_set, it in candidates:
+            # if any kept set is a superset of this, skip
+            if any(ks.issuperset(tok_set) for ks, _ in kept):
+                continue
+            # otherwise, keep this and drop any existing that are subsets of it
+            kept = [(ks, ki) for ks, ki in kept if not tok_set.issuperset(ks)]
+            kept.append((tok_set, it))
+
+        out.extend([it for _, it in kept])
+
     return out
+
 st.title("🔎 Brand & Product Page Finder")
 st.caption("Build " + BUILD_VERSION + " — improved brand-only detection (headings/links/lists + text).")
 

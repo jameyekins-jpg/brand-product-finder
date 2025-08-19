@@ -1,1 +1,19 @@
-v2.1 placeholder changelog
+Brand/Product Page Finder — v2.4.0
+- **Much stronger brand-only detection:** scans headings (H1–H4), list items, links, and body text for "Brand + Product" patterns.
+- Default "Max detected product names per page" increased (8).
+- Keeps '(any)' rows removed and **/reviews/** excluded by default.
+- CSV download = Full table (Brand, Product Name, Blog Post Name, URL).
+
+
+v2.4.1
+- New option **De-duplicate variants on the same page** (ON by default).
+  Collapses entries like "SmartSpin" vs "SmartSpin Litter Box" or "GPS" vs "Guardian GPS" when they point to the same page.
+
+
+v2.4.2
+- Default excludes now also skip /author/ pages.
+- Increased default 'Max detected product names per page' to 12.
+
+
+v2.4.3
+- Stronger per-page de-duplication: token-superset logic prefers more specific names (e.g., keeps 'SmartSpin Litter Box' over 'SmartSpin') even when both appear on the same URL.
