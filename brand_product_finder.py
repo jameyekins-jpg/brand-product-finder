@@ -16,13 +16,15 @@ import streamlit as st
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
+BUILD_VERSION = "2.3.2"
+
 st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 
 # ----------------------------
 # Helpers
 # ----------------------------
 
-USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/2.3.1; +https://example.com)"
+USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/" + BUILD_VERSION + "; +https://example.com)"
 DEFAULT_TIMEOUT = 15
 
 def fetch(url: str) -> t.Optional[str]:
@@ -144,7 +146,15 @@ def jsonld_products(html: str) -> t.List[tuple[str,str]]:
                 if isinstance(n, dict):
                     tval = n.get("@type")
                     types = [tval] if isinstance(tval, str) else (tval or [])
-                    if "Product" in types or (isinstance(types, list) and any(t for t in types if isinstance(t,str) and t.lower()=="product")):
+                    is_product = False
+                    if isinstance(types, list):
+                        for _t in types:
+                            if isinstance(_t, str) and _t.lower() == "product":
+                                is_product = True
+                                break
+                    elif isinstance(types, str) and types.lower() == "product":
+                        is_product = True
+                    if is_product:
                         name = (n.get("name") or "").strip()
                         b = n.get("brand")
                         bname = ""
@@ -200,37 +210,38 @@ def title_guess(html: str) -> str:
         return title.get_text(strip=True)
     return ""
 
+# ---- Defensive guard: ensure function exists in this module ----
+if "detect_products_from_text" not in globals():
+    def detect_products_from_text(text: str, brand: str, max_per_page: int, require_brand_in_name: bool,
+                                  ignore_words: set[str], other_brands: set[str]) -> t.List[str]:
+        return []
+
+# Full implementation (overwrites the no-op above)
 def detect_products_from_text(text: str, brand: str, max_per_page: int, require_brand_in_name: bool,
                               ignore_words: set[str], other_brands: set[str]) -> t.List[str]:
-    """Heuristic extractor for product-like phrases near a brand mention."""
     out = []
     sentences = re.split(r"(?<=[\.\!\?])\s+", text)
     brand_re = re.compile(rf"\b{re.escape(brand)}\b", re.I)
     for sent in sentences:
         if not brand_re.search(sent):
             continue
-        # Break around commas to keep phrases short
         for segment in re.split(r"\s*,\s*", sent):
             if not brand_re.search(segment):
                 continue
-            # Pattern: <Brand> <Product Words...>
-            for m in re.finditer(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,5}})", segment, flags=re.I):
+            for m in re.finditer(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){0,5})", segment, flags=re.I):
                 phrase = clean_phrase_tokens(m.group(1))
                 if not phrase:
                     continue
                 if require_brand_in_name and brand.lower() not in phrase.lower():
                     phrase = f"{brand} {phrase}"
                 out.append(phrase)
-            # Pattern: <Product Words...> by/from <Brand>
             if not require_brand_in_name:
-                for m in re.finditer(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,5}})\s+(?:by|from)\s+{re.escape(brand)}\b", segment, flags=re.I):
+                for m in re.finditer(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){0,5})\s+(?:by|from)\s+{re.escape(brand)}\b", segment, flags=re.I):
                     phrase = clean_phrase_tokens(m.group(1))
                     if phrase:
                         out.append(phrase)
         if len(out) >= max_per_page:
             break
-
-    # De-dup and filter noise
     seen=set(); res=[]
     for p in out:
         pl = p.lower()
@@ -245,7 +256,7 @@ def detect_products_from_text(text: str, brand: str, max_per_page: int, require_
     return res
 
 # ----------------------------
-# Canonicalization (v2.3)
+# Canonicalization
 # ----------------------------
 
 VARIANT_TOKENS = [
@@ -254,7 +265,6 @@ VARIANT_TOKENS = [
 ]
 
 def product_canonical_display(brand: str, name: str) -> str:
-    """Remove minor variant tokens (Wi‑Fi, App‑Controlled, etc.) while preserving readable casing."""
     s = name
     for vt in VARIANT_TOKENS:
         s = re.sub(rf"\b{vt}\b", "", s, flags=re.I)
@@ -274,6 +284,7 @@ def product_canonical_key(brand: str, name: str) -> str:
 # ----------------------------
 
 st.title("🔎 Brand & Product Page Finder")
+st.caption("Build " + BUILD_VERSION + " — if this doesn't show v2.3.2, your deployment is using an older file.")
 
 keep_minutes = st.slider("Keep results visible for (minutes)", 1, 30, 10)
 
