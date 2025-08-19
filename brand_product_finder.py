@@ -16,7 +16,7 @@ import streamlit as st
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
-BUILD_VERSION = "2.6.3"
+BUILD_VERSION = "2.6.6"
 
 st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 
