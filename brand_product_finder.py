@@ -291,6 +291,48 @@ def product_canonical_key(brand: str, name: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "", s)
     return s
 
+
+def _dedupe_within_url(rows: list[dict]) -> list[dict]:
+    """
+    Given rows [{'brand','product','url','title'}], collapse variants within the same brand+URL.
+    Strategy:
+      - Build a normalized key: lowercase, remove brand word, strip non-alnum.
+      - Prefer the longest, most specific name per normalized key.
+      - Additionally, if one name is a substring of another (after removing brand), keep the longer.
+    """
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for r in rows:
+        grouped[(r["brand"].lower(), r["url"])].append(r)
+
+    out = []
+    for (brand_l, url), items in grouped.items():
+        # First pass: choose the "best" per normalized key
+        buckets = {}
+        for it in items:
+            name = it["product"]
+            # normalize
+            norm = re.sub(rf"\b{re.escape(brand_l)}\b", "", name.lower())
+            norm = re.sub(r"[^a-z0-9 ]+", " ", norm)
+            norm = re.sub(r"\s+", " ", norm).strip()
+            key = re.sub(r"\s+", "", norm)
+            # pick best by length (more specific)
+            prev = buckets.get(key)
+            if prev is None or len(name) > len(prev["product"]):
+                buckets[key] = it
+
+        # Second pass: if one surviving name is a substring of another, keep the longer
+        keep = list(buckets.values())
+        keep_names = [re.sub(rf"\b{re.escape(brand_l)}\b", "", k["product"].lower()).strip() for k in keep]
+        final = []
+        for i, it in enumerate(keep):
+            ni = keep_names[i]
+            longer_exists = any((i != j) and (ni in keep_names[j]) and (len(keep[j]["product"]) > len(it["product"])) for j in range(len(keep)))
+            if not longer_exists:
+                final.append(it)
+
+        out.extend(final)
+    return out
 st.title("🔎 Brand & Product Page Finder")
 st.caption("Build " + BUILD_VERSION + " — improved brand-only detection (headings/links/lists + text).")
 
@@ -362,6 +404,7 @@ col4, col5 = st.columns([2,1])
 with col4:
     require_brand_match = st.checkbox("Require brand & product on page", value=False)
     collapse_variants = st.checkbox("Collapse near‑duplicate product names (e.g., Wi‑Fi/WiFi variants)", value=True)
+dedupe_per_url = st.checkbox("De‑duplicate variants on the same page (keep most specific name)", value=True)
 with col5:
     search_case_sensitive = st.checkbox("Case sensitive search", value=False)
 
@@ -638,6 +681,10 @@ if run:
                 r["product"] = product_canonical_display(r["brand"], r["product"])
                 compact.append(r)
             results = compact
+
+        # Per-URL dedupe (keep most specific name on same page)
+        if results and dedupe_per_url:
+            results = _dedupe_within_url(results)
 
         if not results:
             st.warning("No product matches found. Tips: add aliases; keep 'Strict brand proximity' on; include product-only lines to target specific models.")
