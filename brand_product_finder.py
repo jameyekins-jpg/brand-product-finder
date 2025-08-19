@@ -16,7 +16,7 @@ import streamlit as st
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
-BUILD_VERSION = "2.3.2"
+BUILD_VERSION = "2.3.3"
 
 st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 
@@ -210,13 +210,13 @@ def title_guess(html: str) -> str:
         return title.get_text(strip=True)
     return ""
 
-# ---- Defensive guard: ensure function exists in this module ----
+# ---- Defensive guard ----
 if "detect_products_from_text" not in globals():
     def detect_products_from_text(text: str, brand: str, max_per_page: int, require_brand_in_name: bool,
                                   ignore_words: set[str], other_brands: set[str]) -> t.List[str]:
         return []
 
-# Full implementation (overwrites the no-op above)
+# Full implementation
 def detect_products_from_text(text: str, brand: str, max_per_page: int, require_brand_in_name: bool,
                               ignore_words: set[str], other_brands: set[str]) -> t.List[str]:
     out = []
@@ -284,7 +284,7 @@ def product_canonical_key(brand: str, name: str) -> str:
 # ----------------------------
 
 st.title("🔎 Brand & Product Page Finder")
-st.caption("Build " + BUILD_VERSION + " — if this doesn't show v2.3.2, your deployment is using an older file.")
+st.caption("Build " + BUILD_VERSION + " — only real product names are listed (no '(any)').")
 
 keep_minutes = st.slider("Keep results visible for (minutes)", 1, 30, 10)
 
@@ -347,7 +347,7 @@ with col2:
 with col3:
     stop_after = st.number_input("Stop after N pages per product (0 = no limit)", min_value=0, max_value=1000, value=0)
 
-common_excludes_checked = st.checkbox("Exclude common paths (/tag/, /category/, /page/, /feed/)", value=True)
+common_excludes_checked = st.checkbox("Exclude common paths (/tag/, /category/, /page/, /feed/, /reviews/)", value=True)
 custom_excludes = st.text_input("Additional URL patterns to exclude (comma-separated)", value="")
 
 col4, col5 = st.columns([2,1])
@@ -421,7 +421,6 @@ def parse_pasted_products(pasted: str, treat_single_as_brand: bool) -> t.List[Pr
                 prods.append(Product(brand="Unknown", name=line, aliases=[], brand_only=False))
     return prods
 
-# Canonicalization map from provided catalog (if any)
 def build_canonical_map(catalog_patterns: dict[str, list[tuple[str, re.Pattern]]]) -> dict[str, list[tuple[str, re.Pattern]]]:
     return catalog_patterns
 
@@ -444,6 +443,7 @@ def display_results(df: pd.DataFrame):
     out = io.StringIO(); df_out.to_csv(out, index=False)
     st.download_button("Download full table (CSV)", out.getvalue(), file_name="brand_product_pages.csv", mime="text/csv", key="full")
 
+    # Summary hidden by default but still available collapsed
     summary = (
         df.groupby(["brand", "product"])["url"]
         .nunique()
@@ -476,7 +476,6 @@ if run:
         ignore_words = {w.strip().lower() for w in ignore_words_text.split(",") if w.strip()}
         other_brands = {w.strip().lower() for w in other_brands_text.split(",") if w.strip()}
 
-        # Build brand + product patterns
         brand_patterns: dict[str, re.Pattern] = {}
         for p in products:
             if p.brand not in brand_patterns:
@@ -543,7 +542,7 @@ if run:
             # Exclusions
             patterns = []
             if common_excludes_checked:
-                patterns.extend(["/tag/", "/category/", "/page/", "/feed/"])
+                patterns.extend(["/tag/", "/category/", "/page/", "/feed/", "/reviews/"])
             if custom_excludes:
                 patterns.extend([p.strip() for p in custom_excludes.split(",") if p.strip()])
             if patterns:
@@ -580,27 +579,24 @@ if run:
                             if pat.search(text):
                                 hit_products.add(pname)
                         # 2) JSON-LD
-                        if not hit_products and jd_pairs:
+                        if jd_pairs:
                             for bname, pname in jd_pairs:
                                 if (bname or "").lower() == pp.brand.lower():
                                     hit_products.add(canonicalize_phrase(pp.brand, pname.strip(), canon_map, collapse_variants))
                         # 3) Title fallback
-                        if not hit_products and page_title and bp.search(page_title):
+                        if page_title and bp.search(page_title):
                             c = clean_phrase_tokens(page_title)
                             if c:
                                 hit_products.add(canonicalize_phrase(pp.brand, c, canon_map, collapse_variants))
                         # 4) Heuristics
-                        if auto_detect and (strict_mode or not hit_products):
-                            for ph in detect_products_from_text(text, pp.brand, max_per_page=max_names,
-                                                               require_brand_in_name=require_brand_in_name,
-                                                               ignore_words=ignore_words, other_brands=other_brands):
-                                hit_products.add(canonicalize_phrase(pp.brand, ph, canon_map, collapse_variants))
+                        for ph in detect_products_from_text(text, pp.brand, max_per_page=max_names,
+                                                           require_brand_in_name=require_brand_in_name,
+                                                           ignore_words=ignore_words, other_brands=other_brands):
+                            hit_products.add(canonicalize_phrase(pp.brand, ph, canon_map, collapse_variants))
 
-                        if not hit_products:
-                            rows.append({"brand": pp.brand, "product": "(any)", "url": url, "title": page_title})
-                        else:
-                            for pname in sorted(hit_products):
-                                rows.append({"brand": pp.brand, "product": pname, "url": url, "title": page_title})
+                        # IMPORTANT: only record rows when we have a product name (no '(any)' rows)
+                        for pname in sorted(hit_products):
+                            rows.append({"brand": pp.brand, "product": pname, "url": url, "title": page_title})
                     continue
 
                 # Product search
@@ -638,25 +634,21 @@ if run:
             compact = []
             seen_keys = set()
             for r in results:
-                if r["product"] == "(any)":
-                    key = (r["brand"].lower(), "(any)", r["url"])
-                else:
-                    key = (r["brand"].lower(), product_canonical_key(r["brand"], r["product"]), r["url"])
+                key = (r["brand"].lower(), product_canonical_key(r["brand"], r["product"]), r["url"])
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
-                if r["product"] != "(any)":
-                    r = dict(r)
-                    r["product"] = product_canonical_display(r["brand"], r["product"])
+                r = dict(r)
+                r["product"] = product_canonical_display(r["brand"], r["product"])
                 compact.append(r)
             results = compact
 
         if not results:
-            st.warning("No matches found. For brand-only, add a line like 'PetSafe,'. For product-only, paste just the product name. Add aliases to catch variants.")
+            st.warning("No product matches found. Tips: provide aliases; keep 'Strict brand proximity' on; include product-only lines to target specific models.")
         else:
             df = pd.DataFrame(results).sort_values(["brand", "product", "url"])
             st.session_state["last_results"] = {"rows": df.to_dict(orient="records"), "ts": time.time(), "ttl": keep_minutes*60}
-            st.success(f"Found {len(df)} matches — results will be saved here for {keep_minutes} minutes unless you run another scan.")
+            st.success(f"Found {len(df)} product-page matches — results will be saved here for {keep_minutes} minutes unless you run another scan.")
             display_results(df)
 
     except Exception as e:
@@ -664,4 +656,4 @@ if run:
         st.exception(e)
 
 st.markdown("---")
-st.caption("Use brand-only lines like 'PetSafe,' to list every page that mentions that brand. Product-only lines are supported too.")
+st.caption("Brand-only lines (e.g., 'PetSafe,') now collect pages **only when an actual product name is found**. CSV = Full table.")
