@@ -16,7 +16,7 @@ import streamlit as st
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
-BUILD_VERSION = "2.6.2"
+BUILD_VERSION = "2.6.3"
 
 st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 
@@ -222,6 +222,17 @@ def title_guess(html: str) -> str:
 
 # Full implementation (text-based)
 
+
+def seed_competitors_for_brand(target_brand: str) -> set[str]:
+    tb = (target_brand or "").strip().lower()
+    seed = set()
+    if tb == "petsafe":
+        seed |= {
+            "litter-robot", "litter robot", "whisker", "petsnowy", "snow",
+            "catit", "petlibro", "catlink", "tractive", "garmin", "fi", "whistle"
+        }
+    return seed
+
 def detect_other_brands_on_page(html: str, text: str, target_brand: str) -> set[str]:
     """
     Infer competitor/other brand names on the page so we can ignore phrases that include them.
@@ -284,6 +295,7 @@ def detect_other_brands_on_page(html: str, text: str, target_brand: str) -> set[
     # Normalize & exclude target brand
     tb = target_brand.lower()
     pruned = {b for b in found if tb not in b and b != tb}
+    pruned |= seed_competitors_for_brand(target_brand)
     return pruned
 
 def detect_products_from_text(text: str, brand: str, max_per_page: int, require_brand_in_name: bool,
@@ -379,7 +391,7 @@ def phrase_contains_other_brand(phrase: str, other_brands: set[str]) -> bool:
         obn = normalize_text(ob)
         if not obn or len(obn) < 3:
             continue
-        if f" {obn} " in f" {p} ":
+        if f" {obn} " in f" {p} " or f" {obn.replace('-', ' ')} " in f" {p} " or f" {obn.replace(' ', '-')} " in f" {p} ":
             return True
     return False
 
