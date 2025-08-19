@@ -22,7 +22,7 @@ st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 # Helpers
 # ----------------------------
 
-USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/2.2; +https://example.com)"
+USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/2.2.1; +https://example.com)"
 DEFAULT_TIMEOUT = 15
 
 def fetch(url: str) -> t.Optional[str]:
@@ -176,7 +176,7 @@ def clean_phrase_tokens(s: str) -> str:
             break
         if tok.isalpha() and tok.islower():
             break
-        if any(ch in tok for in_ch in [",",";","/"] for ch in [in_ch]):
+        if any(ch in tok for ch in [",",";","/"]):
             break
         kept.append(tok)
     return " ".join(kept).strip(" -–—:|.,)™®(")
@@ -184,18 +184,21 @@ def clean_phrase_tokens(s: str) -> str:
 def title_guess(html: str) -> str:
     try:
         soup = BeautifulSoup(html, "html.parser")
-        og = soup.find("meta", property="og:title")
-        if og and og.get("content"):
-            return og["content"].strip()
-        tw = soup.find("meta", attrs={"name":"twitter:title"})
-        if tw and tw.get("content"):
-            return tw["content"].strip()
-        h1 = soup.find("h1")
-        if h1 and h1.get_text(strip=True):
-            return h1.get_text(strip=True)
-        return ""
     except Exception:
         return ""
+    og = soup.find("meta", property="og:title")
+    if og and og.get("content"):
+        return og["content"].strip()
+    tw = soup.find("meta", attrs={"name":"twitter:title"})
+    if tw and tw.get("content"):
+        return tw["content"].strip()
+    h1 = soup.find("h1")
+    if h1 and h1.get_text(strip=True):
+        return h1.get_text(strip=True)
+    title = soup.find("title")
+    if title and title.get_text(strip=True):
+        return title.get_text(strip=True)
+    return ""
 
 def detect_products_from_text(text: str, brand: str, max_per_page: int, require_brand_in_name: bool,
                               ignore_words: set[str], other_brands: set[str]) -> t.List[str]:
@@ -501,7 +504,8 @@ if run:
                 patterns.extend([p.strip() for p in custom_excludes.split(",") if p.strip()])
             if patterns:
                 before = len(urls)
-                urls = [u for u in urls if not any(pat in u for p in patterns)]
+                # BUGFIX: variable typo (pat -> p) caused NameError
+                urls = [u for u in urls if not any(p in u for p in patterns)]
                 st.write(f"• Excluding patterns {patterns}: removed {before - len(urls)} URLs")
 
             site_urls[base] = urls
