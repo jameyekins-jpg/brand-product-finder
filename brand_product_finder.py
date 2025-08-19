@@ -22,7 +22,7 @@ st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 # Helpers
 # ----------------------------
 
-USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/2.2.1; +https://example.com)"
+USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/2.3; +https://example.com)"
 DEFAULT_TIMEOUT = 15
 
 def fetch(url: str) -> t.Optional[str]:
@@ -200,43 +200,34 @@ def title_guess(html: str) -> str:
         return title.get_text(strip=True)
     return ""
 
-def detect_products_from_text(text: str, brand: str, max_per_page: int, require_brand_in_name: bool,
-                              ignore_words: set[str], other_brands: set[str]) -> t.List[str]:
-    out = []
-    sentences = re.split(r"(?<=[\.\!\?])\s+", text)
-    brand_re = re.compile(rf"\b{re.escape(brand)}\b", re.I)
-    for sent in sentences:
-        if not brand_re.search(sent):
-            continue
-        for segment in re.split(r"\s*,\s*", sent):
-            if not brand_re.search(segment):
-                continue
-            for m in re.finditer(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,5}})", segment, flags=re.I):
-                phrase = clean_phrase_tokens(m.group(1))
-                if not phrase:
-                    continue
-                if require_brand_in_name and brand.lower() not in phrase.lower():
-                    phrase = f"{brand} {phrase}"
-                out.append(phrase)
-            if not require_brand_in_name:
-                for m in re.finditer(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,5}})\s+(?:by|from)\s+{re.escape(brand)}\b", segment, flags=re.I):
-                    phrase = clean_phrase_tokens(m.group(1))
-                    if phrase:
-                        out.append(phrase)
-        if len(out) >= max_per_page:
-            break
-    seen=set(); res=[]
-    for p in out:
-        pl = p.lower()
-        if any(ob in pl for ob in other_brands) or any(w in pl for w in ignore_words):
-            continue
-        if len(p.split()) < 2:
-            continue
-        if pl not in seen:
-            seen.add(pl); res.append(p)
-        if len(res) >= max_per_page:
-            break
-    return res
+# ----------------------------
+# Canonicalization (new in v2.3)
+# ----------------------------
+
+VARIANT_TOKENS = [
+    r"wi[\s\-]?fi", "wifi", r"with\s+wi[\s\-]?fi", r"wi[\s\-]?fi\s+enabled", r"app[\s\-]?controlled", r"with\s+app",
+    r"bluetooth", r"wireless"
+]
+
+def product_canonical_display(brand: str, name: str) -> str:
+    """Remove minor variant tokens (Wi‑Fi, App‑Controlled, etc.) but keep core product words/casing."""
+    s = name
+    for vt in VARIANT_TOKENS:
+        s = re.sub(rf"\b{vt}\b", "", s, flags=re.I)
+    # remove double spaces & stray punctuation
+    s = re.sub(r"\s{2,}", " ", s).strip(" -–—:|.,)™®(").strip()
+    # Drop duplicated brand at start if present twice (rare)
+    if s.lower().startswith(brand.lower() + " " + brand.lower()):
+        s = s[len(brand)+1:]
+    return s
+
+def product_canonical_key(brand: str, name: str) -> str:
+    """Key used only for de-dup across a brand; aggressive normalization for matching variants."""
+    s = product_canonical_display(brand, name)
+    s = s.lower()
+    s = re.sub(rf"\b{re.escape(brand.lower())}\b", "", s)  # ignore brand inside
+    s = re.sub(r"[^a-z0-9]+", "", s)  # squash spaces/punct
+    return s
 
 # ----------------------------
 # UI
@@ -311,6 +302,7 @@ custom_excludes = st.text_input("Additional URL patterns to exclude (comma-separ
 col4, col5 = st.columns([2,1])
 with col4:
     require_brand_match = st.checkbox("Require brand & product on page", value=False)
+    collapse_variants = st.checkbox("Collapse near‑duplicate product names (e.g., Wi‑Fi/WiFi variants)", value=True)
 with col5:
     search_case_sensitive = st.checkbox("Case sensitive search", value=False)
 
@@ -378,14 +370,18 @@ def parse_pasted_products(pasted: str, treat_single_as_brand: bool) -> t.List[Pr
                 prods.append(Product(brand="Unknown", name=line, aliases=[], brand_only=False))
     return prods
 
-# Canonicalization
+# Canonicalization map from provided catalog (if any)
 def build_canonical_map(catalog_patterns: dict[str, list[tuple[str, re.Pattern]]]) -> dict[str, list[tuple[str, re.Pattern]]]:
     return catalog_patterns
 
-def canonicalize_phrase(brand: str, phrase: str, canon_map: dict[str, list[tuple[str, re.Pattern]]]) -> str:
+def canonicalize_phrase(brand: str, phrase: str, canon_map: dict[str, list[tuple[str, re.Pattern]]], collapse_variants: bool) -> str:
+    # 1) If phrase matches a provided product pattern, map to its canonical name
     for cname, pat in canon_map.get(brand, []):
         if pat.search(phrase):
             return cname
+    # 2) Optionally collapse common variant tokens (Wi‑Fi, etc.)
+    if collapse_variants:
+        return product_canonical_display(brand, phrase)
     return phrase
 
 # ----------------------------
@@ -399,7 +395,7 @@ def display_results(df: pd.DataFrame):
     out = io.StringIO(); df_out.to_csv(out, index=False)
     st.download_button("Download full table (CSV)", out.getvalue(), file_name="brand_product_pages.csv", mime="text/csv", key="full")
 
-    # Optional summaries (keep for convenience)
+    # Optional summary
     summary = (
         df.groupby(["brand", "product"])["url"]
         .nunique()
@@ -504,7 +500,6 @@ if run:
                 patterns.extend([p.strip() for p in custom_excludes.split(",") if p.strip()])
             if patterns:
                 before = len(urls)
-                # BUGFIX: variable typo (pat -> p) caused NameError
                 urls = [u for u in urls if not any(p in u for p in patterns)]
                 st.write(f"• Excluding patterns {patterns}: removed {before - len(urls)} URLs")
 
@@ -540,19 +535,18 @@ if run:
                         if not hit_products and jd_pairs:
                             for bname, pname in jd_pairs:
                                 if (bname or "").lower() == pp.brand.lower():
-                                    hit_products.add(pname.strip())
+                                    hit_products.add(canonicalize_phrase(pp.brand, pname.strip(), canon_map, collapse_variants))
                         # 3) Title fallback
                         if not hit_products and page_title and bp.search(page_title):
                             c = clean_phrase_tokens(page_title)
                             if c:
-                                hit_products.add(c)
+                                hit_products.add(canonicalize_phrase(pp.brand, c, canon_map, collapse_variants))
                         # 4) Heuristics
                         if auto_detect and (strict_mode or not hit_products):
                             for ph in detect_products_from_text(text, pp.brand, max_per_page=max_names,
                                                                require_brand_in_name=require_brand_in_name,
                                                                ignore_words=ignore_words, other_brands=other_brands):
-                                ph2 = canonicalize_phrase(pp.brand, ph, canon_map)
-                                hit_products.add(ph2)
+                                hit_products.add(canonicalize_phrase(pp.brand, ph, canon_map, collapse_variants))
 
                         if not hit_products:
                             rows.append({"brand": pp.brand, "product": "(any)", "url": url, "title": page_title})
@@ -574,7 +568,8 @@ if run:
                         bp = brand_patterns.get(pp.brand)
                         if bp and not bp.search(text):
                             continue
-                    rows.append({"brand": out_brand or pp.brand, "product": pp.name, "url": url, "title": page_title})
+                    canonical_name = canonicalize_phrase(out_brand or pp.brand, pp.name, canon_map, collapse_variants)
+                    rows.append({"brand": out_brand or pp.brand, "product": canonical_name, "url": url, "title": page_title})
 
             return rows
 
@@ -589,6 +584,25 @@ if run:
                         results.append(row)
                 processed += 1
                 progress.progress(min(processed / max(len(all_urls), 1), 1.0), text=f"{processed} / {len(all_urls)}")
+
+        # NEW: After collecting, collapse near-duplicates per brand+URL using canonical keys
+        if collapse_variants and results:
+            compact = []
+            seen_keys = set()
+            for r in results:
+                if r["product"] == "(any)":
+                    key = (r["brand"].lower(), "(any)", r["url"])
+                else:
+                    key = (r["brand"].lower(), product_canonical_key(r["brand"], r["product"]), r["url"])
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                # ensure display uses collapsed variant form
+                if r["product"] != "(any)":
+                    r = dict(r)
+                    r["product"] = product_canonical_display(r["brand"], r["product"])
+                compact.append(r)
+            results = compact
 
         if not results:
             st.warning("No matches found. For brand-only, add a line like 'PetSafe,'. For product-only, paste just the product name. Add aliases to catch variants.")
