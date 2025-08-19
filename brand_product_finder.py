@@ -16,7 +16,7 @@ import streamlit as st
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
-BUILD_VERSION = "2.4.0"
+BUILD_VERSION = "2.5.1"
 
 st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 
@@ -108,9 +108,18 @@ def get_text_content(html: str) -> str:
     text = re.sub(r"\s+", " ", text)
     return text
 
+
 def flexible_token_regex(s: str) -> str:
-    # spaces/hyphens/underscores/slashes interchangeable
-    return re.escape(s).replace(r"\ ", r"[ \u00A0\-\_/]*")
+    """
+    Build a regex that treats spaces, NBSPs, hyphens, en/em dashes, underscores, slashes and minus as equivalent separators.
+    Example: "Litter-Robot 4" will match "Litter Robot 4", "Litter–Robot 4", "Litter_Robot 4", etc.
+    """
+    # Split the alias into tokens by any separator-like character
+    tokens = re.split(r"[\s\u00A0_\-/\u2010-\u2015\u2212]+", s.strip())
+    # Join tokens with a class that matches any number of separator-like characters
+    sep = r"[ \u00A0_\-/\u2010-\u2015\u2212]*"
+    return sep.join(map(re.escape, [t for t in tokens if t]))
+
 
 from dataclasses import dataclass, field
 @dataclass
