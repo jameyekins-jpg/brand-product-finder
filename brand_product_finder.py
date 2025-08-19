@@ -16,7 +16,7 @@ import streamlit as st
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
-BUILD_VERSION = "2.6.3"
+BUILD_VERSION = "2.6.5"
 
 st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 
@@ -298,17 +298,68 @@ def detect_other_brands_on_page(html: str, text: str, target_brand: str) -> set[
     pruned |= seed_competitors_for_brand(target_brand)
     return pruned
 
+
+def _brands_in_normalized_text(p_norm: str, brands: set[str]) -> list[str]:
+    return [b for b in brands if b and f" {b} " in p_norm]
+
+def split_multibrand_block(text: str, target_brand: str, brand_set: set[str]) -> list[str]:
+    """
+    Given a text snippet (e.g., a heading or list item), return 0..n sub-snippets
+    that belong to the target brand only. If multiple brands appear, we split at
+    the first non-target brand boundary; if the snippet doesn't start with the
+    target brand, we drop it.
+    """
+    if not text.strip():
+        return []
+    tb = normalize_text(target_brand or "")
+    brands = {tb} | {normalize_text(b) for b in brand_set if b}
+    p_norm = f" {normalize_text(text)} "
+    present = _brands_in_normalized_text(p_norm, brands)
+
+    if set(present) <= {tb}:
+        return [text.strip()]
+
+    # Multiple brands: only keep the leading target segment, up to first other brand
+    if p_norm.strip().startswith(tb + " "):
+        # Find earliest subsequent brand occurrence
+        earliest = None
+        for b in brands:
+            if not b or b == tb:
+                continue
+            pos = p_norm.find(f" {b} ")
+            if pos != -1:
+                earliest = pos if earliest is None else min(earliest, pos)
+        if earliest is not None:
+            raw = text.strip().split()
+            acc = " "
+            cut = 0
+            for w in raw:
+                acc += normalize_text(w) + " "
+                if len(acc) > earliest:
+                    break
+                cut += 1
+            if cut > 0:
+                return [" ".join(raw[:cut]).strip()]
+    return []  # drop if can't safely isolate
+
 def detect_products_from_text(text: str, brand: str, max_per_page: int, require_brand_in_name: bool,
                               ignore_words: set[str], other_brands: set[str]) -> t.List[str]:
     out = []
-    for m in re.finditer(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,5}})", text, flags=re.I):
+    # Split text into coarse sentences/clauses to avoid cross-brand gluing
+    chunks = re.split(r"[\.|;|•|\||/]+", text)
+    for chunk in chunks:
+        for m in re.finditer(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,5}})", chunk, flags=re.I):
         phrase = clean_phrase_tokens(m.group(1))
         if phrase:
-            out.append(phrase)
-    for m in re.finditer(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,5}})\s+(?:by|from)\s+{re.escape(brand)}\b", text, flags=re.I):
+            iso_parts = split_multibrand_block(phrase, brand, other_brands | {brand})
+            for ip in iso_parts:
+                out.append(ip)
+    for m in re.finditer(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,5}})\s+(?:by|from)\s+{re.escape(brand)}\b", chunk, flags=re.I):
         phrase = clean_phrase_tokens(m.group(1))
         if phrase:
-            out.append(phrase)
+            iso_parts = split_multibrand_block(phrase, brand, other_brands | {brand})
+            for ip in iso_parts:
+                out.append(ip)
     seen=set(); res=[]
     for p in out:
         pl = p.lower()
@@ -328,19 +379,29 @@ def detect_products_from_html(html: str, brand: str, max_per_page: int, require_
                               ignore_words: set[str], other_brands: set[str]) -> t.List[str]:
     soup = BeautifulSoup(html, "html.parser")
     candidates = []
-    for tag in soup.find_all(["h1","h2","h3","h4","strong","b","li","a"]):
+    for tag in soup.find_all(["h1","h2","h3","h4","strong","b","li","a","p","span"]):
         txt = tag.get_text(" ", strip=True)
         if txt:
+
+        # Skip footer/sidebar/widgets
+        skip_classes = {"footer","site-footer","widget","widgets","sidebar","site-sidebar","related","breadcrumbs","tag-cloud","tags","nav","menu"}
+        cls = set((tag.get("class") or []))
+        idv = set([tag.get("id")] if tag.get("id") else [])
+        if cls & skip_classes or idv & skip_classes:
+            continue
+
             candidates.append(txt)
     out = []
     pat_prefix = re.compile(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,6}})", re.I)
     pat_suffix = re.compile(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,6}})\s+(?:by|from)\s+{re.escape(brand)}\b", re.I)
     for text in candidates:
-        for m in pat_prefix.finditer(text):
+        # Split or drop multi-brand blocks first
+        for text_part in split_multibrand_block(text, brand, other_brands | {brand}):
+            for m in pat_prefix.finditer(text_part):
             phrase = clean_phrase_tokens(m.group(1))
             if phrase:
                 out.append(phrase)
-        for m in pat_suffix.finditer(text):
+            for m in pat_suffix.finditer(text_part):
             phrase = clean_phrase_tokens(m.group(1))
             if phrase:
                 out.append(phrase)
