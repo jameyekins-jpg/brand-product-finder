@@ -16,7 +16,7 @@ import streamlit as st
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
-BUILD_VERSION = "2.6.0"
+BUILD_VERSION = "2.6.1"
 
 st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 
@@ -707,7 +707,15 @@ if run:
 
             rows = []
             jd_pairs = jsonld_products(html) if auto_detect else []
-            page_other_brands = detect_other_brands_on_page(html, text, pp.brand)
+            brand_hint = ''
+            try:
+                brand_hint = pp.brand  # when inside brand-only scan loop
+            except Exception:
+                try:
+                    brand_hint = brand or target_brand  # if available in this scope
+                except Exception:
+                    brand_hint = ''
+            page_other_brands = detect_other_brands_on_page(html, text, brand_hint)
 
             for pp in compiled_products:
                 if pp.brand_only:
