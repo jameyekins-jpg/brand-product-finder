@@ -12,19 +12,11 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-# Only scan inside the main article body to avoid footer/sidebar "brand soup"
-DEFAULT_CONTENT_SELECTORS = [
-    ".entry-content", ".post-content", "article .entry-content", ".single-content",
-    ".content-area article", "main article", "article .content", ".td-post-content",
-    ".et_pb_post_content", ".theiaPostSlider_slides", ".post__content", ".post-body",
-    ".g1-content", ".s-post-content", ".post-entry", ".single-post .content"
-]
-
 import streamlit as st
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
-BUILD_VERSION = "2.7.0"
+BUILD_VERSION = "2.7.1"
 
 st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 
@@ -332,71 +324,28 @@ def detect_products_from_text(text: str, brand: str, max_per_page: int, require_
             break
     return res
 
-
 def detect_products_from_html(html: str, brand: str, max_per_page: int, require_brand_in_name: bool,
                               ignore_words: set[str], other_brands: set[str]) -> t.List[str]:
-    """Extract product-like phrases from HTML content with widget/footer guards and brand isolation.
-       v2.7.0: limit scraping to main content container(s) to avoid footer/sidebar brand soup.
-    """
     soup = BeautifulSoup(html, "html.parser")
-
-    # Choose the first matching content container; fall back to soup
-    root = None
-    for sel in DEFAULT_CONTENT_SELECTORS:
-        try:
-            node = soup.select_one(sel)
-        except Exception:
-            node = None
-        if node:
-            root = node
-            break
-    if root is None:
-        root = soup
-
-    candidates: list[str] = []
-
-    for tag in root.find_all(["h1","h2","h3","h4","strong","b","li","a","p","span"]):
-        # Skip obvious non-content sections
-        skip_classes = {"footer","site-footer","site-info","widget","widgets","sidebar","site-sidebar",
-                        "related","related-posts","author","entry-meta","comments","breadcrumbs",
-                        "tag-cloud","tags","nav","menu","toc","table-of-contents"}
-        cls = set((tag.get("class") or []))
-        idv = set([tag.get("id")] if tag.get("id") else [])
-        if cls & skip_classes or idv & skip_classes:
-            continue
+    candidates = []
+    for tag in soup.find_all(["h1","h2","h3","h4","strong","b","li","a"]):
         txt = tag.get_text(" ", strip=True)
         if txt:
             candidates.append(txt)
-
-    pat_prefix = re.compile(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,5}})", flags=re.I)
-    pat_suffix = re.compile(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,5}})\s+(?:by|from)\s+{re.escape(brand)}\b", flags=re.I)
-
-    hits: list[str] = []
-    # Incorporate aggressive anti-glue set, if present in the codebase
-    try:
-        comp_all = (other_brands | {brand}) | seed_competitors_for_brand(brand)
-    except Exception:
-        comp_all = (other_brands | {brand})
-
+    out = []
+    pat_prefix = re.compile(rf"\b{re.escape(brand)}(?:'s)?\s+([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,6}})", re.I)
+    pat_suffix = re.compile(rf"([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){{0,6}})\s+(?:by|from)\s+{re.escape(brand)}\b", re.I)
     for text in candidates:
-        # If competitor brand appears with our brand, skip the snippet
-        tl = text.lower()
-        if any(b in tl for b in comp_all if b != brand.lower()):
-            continue
-        for text_part in split_multibrand_block(text, brand, comp_all):
-            for m in pat_prefix.finditer(text_part):
-                phrase = clean_phrase_tokens(m.group(1))
-                if phrase:
-                    hits.append(phrase)
-            for m in pat_suffix.finditer(text_part):
-                phrase = clean_phrase_tokens(m.group(1))
-                if phrase:
-                    hits.append(phrase)
-
-    # Post filter and canonicalize
-    res: list[str] = []
-    seen: set[str] = set()
-    for p in hits:
+        for m in pat_prefix.finditer(text):
+            phrase = clean_phrase_tokens(m.group(1))
+            if phrase:
+                out.append(phrase)
+        for m in pat_suffix.finditer(text):
+            phrase = clean_phrase_tokens(m.group(1))
+            if phrase:
+                out.append(phrase)
+    seen=set(); res=[]
+    for p in out:
         pl = p.lower()
         if any(ob in pl for ob in other_brands) or any(w in pl for w in ignore_words):
             continue
@@ -410,20 +359,18 @@ def detect_products_from_html(html: str, brand: str, max_per_page: int, require_
             break
     return res
 
-
+VARIANT_TOKENS = [
+    r"wi[\s\-]?fi", "wifi", r"with\s+wi[\s\-]?fi", r"wi[\s\-]?fi\s+enabled", r"app[\s\-]?controlled", r"with\s+app",
+    r"bluetooth", r"wireless"
+]
 def product_canonical_display(brand: str, name: str) -> str:
     s = name
-    tokens = globals().get("VARIANT_TOKENS", [
-        r"wi[\s\-]?fi", "wifi", r"with\s+wi[\s\-]?fi", r"wi[\s\-]?fi\s+enabled", r"app[\s\-]?controlled", r"with\s+app",
-        r"bluetooth", r"wireless"
-    ])
-    for vt in tokens:
+    for vt in VARIANT_TOKENS:
         s = re.sub(rf"\b{vt}\b", "", s, flags=re.I)
     s = re.sub(r"\s{2,}", " ", s).strip(" -–—:|.,)™®(").strip()
     if s.lower().startswith(brand.lower() + " " + brand.lower()):
         s = s[len(brand)+1:]
     return s
-
 
 def normalize_text(text: str) -> str:
     """
@@ -882,3 +829,37 @@ if run:
 
 st.markdown("---")
 st.caption("Brand-only lines now use **headings, links, list items, and full-text** to extract product names. CSV = Full table.")
+
+
+def split_multibrand_block(text: str, target_brand: str, brand_set: set[str]) -> list[str]:
+    """
+    Given a text block that might contain multiple brand names, return only segments
+    that belong to the target brand. We split on occurrences of *other* brands.
+    """
+    tb = (target_brand or "").lower().strip()
+    if not tb:
+        return [text]
+
+    # Build regex of other brands (escape, sort by length desc to match longer first)
+    others = [b.lower() for b in brand_set if b and b.lower() != tb]
+    if not others:
+        return [text]
+    others_sorted = sorted(set(others), key=len, reverse=True)
+    # Avoid pathological regex if there are odd characters
+    parts_regex = r"(" + "|".join(re.escape(b) for b in others_sorted) + r")"
+
+    try:
+        # Split on other brand tokens; keep pieces that contain the target brand only
+        raw_parts = re.split(parts_regex, text, flags=re.I)
+    except re.error:
+        raw_parts = [text]
+
+    cleaned: list[str] = []
+    for part in raw_parts:
+        if not part or part.isspace():
+            continue
+        pl = part.lower()
+        if tb in pl and not any(ob in pl for ob in others_sorted):
+            cleaned.append(part.strip())
+
+    return cleaned or [text]
