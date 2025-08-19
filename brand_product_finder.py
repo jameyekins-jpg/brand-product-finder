@@ -16,7 +16,7 @@ import streamlit as st
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
-BUILD_VERSION = "2.6.1"
+BUILD_VERSION = "2.6.2"
 
 st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 
@@ -370,6 +370,19 @@ def normalize_text(text: str) -> str:
     text = text.lower()
     return re.sub(r"\s+", " ", text).strip()
 
+def phrase_contains_other_brand(phrase: str, other_brands: set[str]) -> bool:
+    """Return True if normalized phrase contains any normalized other-brand token sequence."""
+    p = normalize_text(phrase)
+    for ob in other_brands:
+        if not ob:
+            continue
+        obn = normalize_text(ob)
+        if not obn or len(obn) < 3:
+            continue
+        if f" {obn} " in f" {p} ":
+            return True
+    return False
+
 def product_canonical_key(brand: str, name: str) -> str:
     s = product_canonical_display(brand, name).lower()
     s = re.sub(rf"\b{re.escape(brand.lower())}\b", "", s)
@@ -488,7 +501,7 @@ with col2:
 with col3:
     stop_after = st.number_input("Stop after N pages per product (0 = no limit)", min_value=0, max_value=1000, value=0)
 
-common_excludes_checked = st.checkbox("Exclude common paths (/tag/, /category/, /page/, /feed/, /reviews/, /author/)", value=True)
+common_excludes_checked = st.checkbox("Exclude common paths (/tag/, /category/, /page/, /feed/, /reviews/, /author/, /about/, /privacy/, /terms/, /contact/, /affiliate/, /advertise/)", value=True)
 custom_excludes = st.text_input("Additional URL patterns to exclude (comma-separated)", value="")
 
 col4, col5 = st.columns([2,1])
@@ -682,7 +695,7 @@ if run:
 
             patterns = []
             if common_excludes_checked:
-                patterns.extend(["/tag/", "/category/", "/page/", "/feed/", "/reviews/", "/author/"])
+                patterns.extend(["/tag/", "/category/", "/page/", "/feed/", "/reviews/", "/author/", "/about/", "/privacy", "/terms", "/contact", "/affiliate", "/advertise"])
             if custom_excludes:
                 patterns.extend([p.strip() for p in custom_excludes.split(",") if p.strip()])
             if patterns:
@@ -729,7 +742,7 @@ if run:
                             if (bname or "").lower() == pp.brand.lower():
                                 pname_norm = pname.strip()
                                 # skip if contains any other brand token (auto or manual)
-                                if not any(ob in pname_norm.lower() for ob in (other_brands | page_other_brands)):
+                                if not phrase_contains_other_brand(pname_norm, (other_brands | page_other_brands)):
                                     hit_products.add(canonicalize_phrase(pp.brand, pname_norm, canon_map, collapse_variants))
                         for ph in detect_products_from_html(html, pp.brand, max_per_page=max_names,
                                                             require_brand_in_name=require_brand_in_name,
@@ -750,7 +763,7 @@ if run:
                     if (out_brand == "Unknown" or not require_brand_match) and jd_pairs:
                         for bname, pname in jd_pairs:
                             if pname and any(pat.search(pname) for pat in pp.pats):
-                                if not any(ob in pname.lower() for ob in other_brands):
+                                if not phrase_contains_other_brand(pname, other_brands):
                                     out_brand = bname or out_brand
                                     break
                     if require_brand_match:
