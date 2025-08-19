@@ -22,7 +22,7 @@ st.set_page_config(page_title="Brand/Product Page Finder", layout="wide")
 # Helpers
 # ----------------------------
 
-USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/2.1; +https://example.com)"
+USER_AGENT = "Mozilla/5.0 (compatible; BrandProductFinder/2.2; +https://example.com)"
 DEFAULT_TIMEOUT = 15
 
 def fetch(url: str) -> t.Optional[str]:
@@ -110,10 +110,6 @@ def flexible_token_regex(s: str) -> str:
     # spaces/hyphens/underscores/slashes interchangeable
     return re.escape(s).replace(r"\ ", r"[ \u00A0\-\_/]*")
 
-def site_from_url(u: str) -> str:
-    p = urlparse(u)
-    return f"{p.scheme}://{p.netloc}/" if p.scheme and p.netloc else ""
-
 @dataclass
 class Product:
     brand: str
@@ -180,7 +176,7 @@ def clean_phrase_tokens(s: str) -> str:
             break
         if tok.isalpha() and tok.islower():
             break
-        if any(ch in tok for ch in [",",";","/"]):
+        if any(ch in tok for in_ch in [",",";","/"] for ch in [in_ch]):
             break
         kept.append(tok)
     return " ".join(kept).strip(" -–—:|.,)™®(")
@@ -254,9 +250,11 @@ if "last_results" in st.session_state:
         with st.expander(f"Last results (kept for {int((rec.get('ttl',600)-age)//60)+1} more min)", expanded=False):
             df_cached = pd.DataFrame(rec["rows"])
             if not df_cached.empty:
-                st.dataframe(df_cached.sort_values(["brand","product","url"]), use_container_width=True)
+                df_cached = df_cached.rename(columns={"product":"Product Name","title":"Blog Post Name","url":"URL","brand":"Brand"})
+                df_cached = df_cached[["Brand","Product Name","Blog Post Name","URL"]]
+                st.dataframe(df_cached, use_container_width=True)
                 out = io.StringIO(); df_cached.to_csv(out, index=False)
-                st.download_button("Download full results (with URLs) CSV", out.getvalue(), file_name="brand_product_pages.csv", mime="text/csv", key="cached_full")
+                st.download_button("Download full results (CSV)", out.getvalue(), file_name="brand_product_pages.csv", mime="text/csv", key="cached_full")
             else:
                 st.write("No cached rows.")
 
@@ -293,6 +291,7 @@ pasted_ph = (
 "Litter-Robot 4                   # Product-only"
 )
 pasted = st.text_area("Or paste products (one per line)", height=180, placeholder=pasted_ph)
+treat_single_as_brand = st.checkbox("Treat single-field pasted lines as brands (recommended)", value=True)
 st.markdown("**Tip:** Add common aliases (e.g., `Litter-Robot 4|Litter Robot 4|LR4`) to improve matching.")
 
 col1, col2, col3 = st.columns([1,1,1])
@@ -355,7 +354,7 @@ def parse_csv_products(file_bytes: bytes) -> t.List[Product]:
             prods.append(Product(brand=brand, name="", aliases=[], brand_only=True))
     return prods
 
-def parse_pasted_products(pasted: str) -> t.List[Product]:
+def parse_pasted_products(pasted: str, treat_single_as_brand: bool) -> t.List[Product]:
     prods: t.List[Product] = []
     for raw in pasted.splitlines():
         line = raw.strip()
@@ -370,7 +369,10 @@ def parse_pasted_products(pasted: str) -> t.List[Product]:
             else:
                 prods.append(Product(brand=brand, name="", aliases=[], brand_only=True))
         else:
-            prods.append(Product(brand="Unknown", name=line, aliases=[], brand_only=False))
+            if treat_single_as_brand:
+                prods.append(Product(brand=line, name="", aliases=[], brand_only=True))
+            else:
+                prods.append(Product(brand="Unknown", name=line, aliases=[], brand_only=False))
     return prods
 
 # Canonicalization
@@ -387,47 +389,22 @@ def canonicalize_phrase(brand: str, phrase: str, canon_map: dict[str, list[tuple
 # Main logic & output
 # ----------------------------
 def display_results(df: pd.DataFrame):
-    st.markdown("### Results — grouped by Brand → Product → URLs")
-    for (brand, product), sub in df.groupby(["brand", "product"]):
-        with st.expander(f"{brand} › {product}  ({len(sub)} page{'s' if len(sub)!=1 else ''})", expanded=False):
-            st.dataframe(sub[["url"]], use_container_width=True, hide_index=True)
-
     st.markdown("### Full table")
-    st.dataframe(df, use_container_width=True)
-    out = io.StringIO(); df.to_csv(out, index=False)
-    st.download_button("Download full results (with URLs) CSV", out.getvalue(), file_name="brand_product_pages.csv", mime="text/csv", key="full")
+    df_out = df.rename(columns={"brand":"Brand","product":"Product Name","title":"Blog Post Name","url":"URL"})
+    df_out = df_out[["Brand","Product Name","Blog Post Name","URL"]]
+    st.dataframe(df_out, use_container_width=True)
+    out = io.StringIO(); df_out.to_csv(out, index=False)
+    st.download_button("Download full table (CSV)", out.getvalue(), file_name="brand_product_pages.csv", mime="text/csv", key="full")
 
-    # Partner-ready CSV (one row per URL) with website + page title
-    partner = df.copy()
-    partner = partner.rename(columns={"product":"product_name", "title":"blog_post_name"})
-    partner["website"] = partner["url"].apply(site_from_url)
-    partner = partner[["website","brand","product_name","blog_post_name","url"]]
-    outp = io.StringIO(); partner.to_csv(outp, index=False)
-    st.download_button("Download partner-ready CSV (one row per URL)", outp.getvalue(), file_name="brand_product_partner_ready.csv", mime="text/csv", key="partner")
-
-    # Summary WITH URLs (pipe-separated)
-    summary_urls = (
-        df.groupby(["brand","product"])["url"]
-          .apply(lambda s: "|".join(sorted(set(s))))
-          .reset_index(name="urls")
-    )
-    summary_urls["pages_found"] = summary_urls["urls"].apply(lambda u: 0 if not u else u.count("|")+1)
-    st.markdown("**Summary (one row per product, with URLs):**")
-    st.dataframe(summary_urls, use_container_width=True)
-    out3 = io.StringIO(); summary_urls.to_csv(out3, index=False)
-    st.download_button("Download summary (WITH URLs) CSV", out3.getvalue(), file_name="brand_product_summary_with_urls.csv", mime="text/csv", key="sum_with_urls")
-
-    # Summary without URLs (counts only)
+    # Optional summaries (keep for convenience)
     summary = (
         df.groupby(["brand", "product"])["url"]
         .nunique()
         .reset_index(name="pages_found")
         .sort_values(["brand", "product"])
     )
-    st.markdown("**Summary (unique pages per product):**")
-    st.dataframe(summary, use_container_width=True)
-    out2 = io.StringIO(); summary.to_csv(out2, index=False)
-    st.download_button("Download summary (no URLs) CSV", out2.getvalue(), file_name="brand_product_summary.csv", mime="text/csv", key="sum_no_urls")
+    with st.expander("Summary (unique pages per product)", expanded=False):
+        st.dataframe(summary, use_container_width=True)
 
 if run:
     try:
@@ -444,7 +421,7 @@ if run:
                 st.error(f"Could not parse CSV: {e}")
                 st.stop()
         if not uploaded and pasted.strip():
-            products = parse_pasted_products(pasted)
+            products = parse_pasted_products(pasted, treat_single_as_brand)
         if not products:
             st.error("Please provide at least one product or brand line (CSV or pasted lines).")
             st.stop()
@@ -524,7 +501,7 @@ if run:
                 patterns.extend([p.strip() for p in custom_excludes.split(",") if p.strip()])
             if patterns:
                 before = len(urls)
-                urls = [u for u in urls if not any(pat in u for pat in patterns)]
+                urls = [u for u in urls if not any(pat in u for p in patterns)]
                 st.write(f"• Excluding patterns {patterns}: removed {before - len(urls)} URLs")
 
             site_urls[base] = urls
